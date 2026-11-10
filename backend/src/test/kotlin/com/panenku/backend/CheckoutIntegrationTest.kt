@@ -39,7 +39,7 @@ import java.time.*
 import java.util.UUID
 import java.util.concurrent.*
 
-@SpringBootTest(properties = ["panenku.jwt.secret=test-only-32-byte-secret-for-tests-123456789", "panenku.jwt.issuer=panenku"])
+@SpringBootTest(properties = ["panenku.jwt.secret=test-only-32-byte-secret-for-tests-123456789", "panenku.jwt.issuer=panenku", "scheduler.enabled=false"])
 @AutoConfigureMockMvc
 @Testcontainers
 @Import(CheckoutIntegrationTest.FixedTime::class)
@@ -56,6 +56,9 @@ class CheckoutIntegrationTest {
         @Bean @Primary fun fixedClock(): Clock = Clock.fixed(Instant.parse("2026-11-10T00:00:00Z"), ZoneOffset.UTC)
     }
     @Autowired lateinit var db: JdbcTemplate
+    @Autowired lateinit var expiration: com.panenku.backend.scheduler.OrderExpirationService
+    @Autowired lateinit var orderRepository: com.panenku.backend.modules.pembeli.repository.OrderRepository
+    @Autowired lateinit var appConfig: com.panenku.backend.config.AppConfig
     @Autowired lateinit var checkout: CheckoutService
     @Autowired lateinit var cart: CartService
     @Autowired lateinit var productService: ProductService
@@ -99,6 +102,91 @@ class CheckoutIntegrationTest {
             assertTrue(ready.await(5, TimeUnit.SECONDS)); start.countDown()
             return futures.map { it.get(20, TimeUnit.SECONDS) }
         } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `expired order releases reserved stock once under concurrent jobs`() {
+        val order = checkout.checkout(buyer, "expire-race", request())
+        val completed = java.util.concurrent.atomic.AtomicInteger()
+        val results = parallel(
+            { if (expiration.expire(order.orderId, farmer, order.expiresAt)) completed.incrementAndGet(); order },
+            { if (expiration.expire(order.orderId, farmer, order.expiresAt)) completed.incrementAndGet(); order }
+        )
+        assertTrue(results.all { it.isSuccess }, results.toString()); assertEquals(1, completed.get())
+        assertEquals(BigDecimal("0.00"), reserved())
+        assertEquals(BigDecimal("10.00"), db.queryForObject("SELECT stock_physical FROM products WHERE id=?", BigDecimal::class.java, product))
+        assertEquals("kedaluwarsa", db.queryForObject("SELECT order_status FROM orders WHERE id=?", String::class.java, order.orderId))
+        assertEquals("released", db.queryForObject("SELECT status FROM stock_reservations WHERE order_id=?", String::class.java, order.orderId))
+        assertEquals(2L, count("order_status_history"))
+        assertEquals("system", db.queryForObject("SELECT actor_role FROM order_status_history WHERE to_status='kedaluwarsa'", String::class.java))
+        assertEquals(1L, db.queryForObject("SELECT count(*) FROM order_status_history WHERE to_status='kedaluwarsa' AND actor_id IS NULL", Long::class.java))
+    }
+    @Test fun `expiration honors exact cutoff and records previous status`() {
+        val order = checkout.checkout(buyer, "expire-boundary", request())
+        db.update("UPDATE orders SET order_status='menunggu_pembayaran',payment_status='bukti_ditolak' WHERE id=?", order.orderId)
+        assertFalse(expiration.expire(order.orderId, farmer, order.expiresAt.minusNanos(1)))
+        assertEquals(BigDecimal("0.75"), reserved())
+        assertTrue(expiration.expire(order.orderId, farmer, order.expiresAt))
+        assertFalse(expiration.expire(order.orderId, farmer, order.expiresAt.plusSeconds(1)))
+        assertEquals("menunggu_pembayaran", db.queryForObject("SELECT from_status FROM order_status_history WHERE to_status='kedaluwarsa'", String::class.java))
+    }
+    @Test fun `expiration excludes payment verification paid future and terminal orders`() {
+        val now = Instant.parse("2026-11-11T00:00:00Z")
+        val cases = listOf(
+            Triple("menunggu_petani", "belum_dibayar", true),
+            Triple("menunggu_pembayaran", "belum_dibayar", true),
+            Triple("menunggu_petani", "menunggu_verifikasi", false),
+            Triple("verifikasi_pembayaran", "menunggu_verifikasi", false),
+            Triple("diproses", "terverifikasi", false),
+            Triple("dibatalkan", "belum_dibayar", false)
+        )
+        val orders = cases.mapIndexed { i, (status, payment, _) ->
+            checkout.checkout(buyer, "expiry-case-$i", request("0.10")).also {
+                db.update("UPDATE orders SET order_status=?,payment_status=? WHERE id=?", status, payment, it.orderId)
+            }
+        }
+        val future = checkout.checkout(buyer, "expiry-future", request("0.10"))
+        db.update("UPDATE orders SET expires_at=? WHERE id=?", java.sql.Timestamp.from(now.plusSeconds(1)), future.orderId)
+        val candidates = orderRepository.findExpiredOrdersBefore(now, org.springframework.data.domain.PageRequest.of(0, 100))
+        assertEquals(orders.take(2).map { it.orderId }.toSet(), candidates.map { it.id }.toSet())
+        orders.forEachIndexed { i, order -> assertEquals(cases[i].third, expiration.expire(order.orderId, farmer, now)) }
+        assertFalse(expiration.expire(future.orderId, farmer, now))
+        assertEquals(BigDecimal("0.50"), reserved())
+    }
+    @Test fun `expiration failure rolls back order reservation stock and history together`() {
+        val order = checkout.checkout(buyer, "expire-rollback", request())
+        db.execute("CREATE FUNCTION test_fail_expiry() RETURNS TRIGGER LANGUAGE plpgsql AS 'BEGIN IF NEW.to_status = ''kedaluwarsa'' THEN RAISE EXCEPTION ''simulated expiry history failure''; END IF; RETURN NEW; END;'")
+        db.execute("CREATE TRIGGER test_expiry_failure BEFORE INSERT ON order_status_history FOR EACH ROW EXECUTE FUNCTION test_fail_expiry()")
+        try {
+            assertThrows(Exception::class.java) { expiration.expire(order.orderId, farmer, order.expiresAt) }
+            assertEquals("menunggu_petani", db.queryForObject("SELECT order_status FROM orders WHERE id=?", String::class.java, order.orderId))
+            assertEquals("active", db.queryForObject("SELECT status FROM stock_reservations WHERE order_id=?", String::class.java, order.orderId))
+            assertEquals(BigDecimal("0.75"), reserved()); assertEquals(1L, count("order_status_history"))
+        } finally { db.execute("DROP TRIGGER test_expiry_failure ON order_status_history"); db.execute("DROP FUNCTION test_fail_expiry()") }
+    }
+    @Test fun `scheduler continues other orders when one expiration fails`() {
+        val first = checkout.checkout(buyer, "expiry-batch-1", request())
+        val second = checkout.checkout(otherBuyer, "expiry-batch-2", request())
+        db.update("UPDATE orders SET expires_at=? WHERE id=?", java.sql.Timestamp.from(first.expiresAt.minusSeconds(2)), first.orderId)
+        db.update("UPDATE orders SET expires_at=? WHERE id=?", java.sql.Timestamp.from(second.expiresAt.minusSeconds(1)), second.orderId)
+        db.execute("""CREATE FUNCTION test_fail_one_expiry() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN
+            IF NEW.order_id = '${first.orderId}'::uuid AND NEW.to_status = 'kedaluwarsa' THEN
+                RAISE EXCEPTION 'simulated isolated expiry failure';
+            END IF; RETURN NEW; END; $$""")
+        db.execute("CREATE TRIGGER test_one_expiry_failure BEFORE INSERT ON order_status_history FOR EACH ROW EXECUTE FUNCTION test_fail_one_expiry()")
+        try {
+            val job = com.panenku.backend.scheduler.ExpirationJob(orderRepository, expiration, Clock.fixed(first.expiresAt, ZoneOffset.UTC), 2)
+            job.expireOverdueOrders()
+            assertEquals("menunggu_petani", db.queryForObject("SELECT order_status FROM orders WHERE id=?", String::class.java, first.orderId))
+            assertEquals("kedaluwarsa", db.queryForObject("SELECT order_status FROM orders WHERE id=?", String::class.java, second.orderId))
+            assertEquals(BigDecimal("0.75"), reserved())
+        } finally { db.execute("DROP TRIGGER test_one_expiry_failure ON order_status_history"); db.execute("DROP FUNCTION test_fail_one_expiry()") }
+    }
+    @Test fun `shared AppConfig binds the same JWT and storage settings`() {
+        assertEquals("test-only-32-byte-secret-for-tests-123456789", appConfig.jwt.secret)
+        assertEquals("panenku", appConfig.jwt.issuer)
+        assertEquals(86400000L, appConfig.jwt.expiration)
+        assertEquals("localhost:9000", appConfig.minio.endpoint)
+        assertEquals("panenku-files", appConfig.minio.bucket)
     }
     @Test fun `UAT04 two buyers cannot oversell last kilogram`() {
         db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)

@@ -48,6 +48,6 @@ class StockReservation(
 @Entity @Table(name = "order_status_history")
 class OrderStatusHistory(
     @Id var id: UUID = UUID.randomUUID(), var orderId: UUID = UUID.randomUUID(), var fromStatus: String? = null,
-    var toStatus: String = "menunggu_petani", var actorId: UUID = UUID.randomUUID(), var actorRole: String = "pembeli",
+    var toStatus: String = "menunggu_petani", var actorId: UUID? = null, var actorRole: String = "pembeli",
     var changedAt: Instant = Instant.now(), var note: String? = null
 )
