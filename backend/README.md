@@ -1277,7 +1277,7 @@ Content-Type: application/json
 ## 🚀 Cara Menjalankan
 
 ### Prasyarat
-- JDK 21 (untuk konfigurasi build saat ini)
+- JDK 17 (untuk konfigurasi build saat ini)
 - Docker & Docker Compose (untuk PostgreSQL & MinIO)
 - Gradle
 
