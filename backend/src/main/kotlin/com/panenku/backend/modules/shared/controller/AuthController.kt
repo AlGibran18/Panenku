@@ -10,6 +10,9 @@ import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
+import org.springframework.security.core.annotation.AuthenticationPrincipal
+import org.springframework.security.oauth2.jwt.Jwt
+import java.util.UUID
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -34,4 +37,8 @@ class AuthController(
             HttpStatus.OK
         )
     }
+
+    @GetMapping("/me")
+    fun me(@AuthenticationPrincipal jwt: Jwt): ApiResponse<UserDTO> =
+        successResponse(authService.me(UUID.fromString(jwt.subject)), "Profil akun")
 }

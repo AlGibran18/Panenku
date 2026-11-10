@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component
 import java.time.Clock
 import java.time.Instant
 import java.util.Date
+import java.util.UUID
 
 /** JWT issued by Geisar's auth module and accepted by the shared resource-server decoder. */
 @Component
@@ -30,6 +31,12 @@ class JwtProvider(
         true
     } catch (_: Exception) { false }
     fun extractUserId(token: String): String = claims(token).subject
-    private fun claims(token: String) = Jwts.parser().verifyWith(getKey()).requireIssuer(issuer)
-        .clock { Date.from(Instant.now(clock)) }.build().parseSignedClaims(token).payload
+    private fun claims(token: String): io.jsonwebtoken.Claims {
+        val signed = Jwts.parser().verifyWith(getKey()).requireIssuer(issuer).clockSkewSeconds(60)
+            .clock { Date.from(Instant.now(clock)) }.build().parseSignedClaims(token)
+        require(signed.header.algorithm == "HS256") { "Algoritma token tidak sesuai." }
+        requireNotNull(signed.payload.expiration) { "Token wajib memiliki waktu kedaluwarsa." }
+        UUID.fromString(signed.payload.subject)
+        return signed.payload
+    }
 }

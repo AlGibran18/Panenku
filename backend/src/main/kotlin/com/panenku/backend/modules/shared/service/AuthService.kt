@@ -38,6 +38,13 @@ class AuthService(
         else buyers.save(BuyerProfile(id = id, fullName = request.fullName!!.trim(), contactPhone = request.contactPhone))
         return UserDTO(id, saved.email, saved.role, saved.status)
     }
+    @Transactional(readOnly = true)
+    fun me(id: java.util.UUID): UserDTO {
+        val user = userRepository.findById(id).orElse(null)
+            ?: throw AppException("Akun tidak ditemukan", HttpStatus.UNAUTHORIZED)
+        return UserDTO(user.id!!, user.email, user.role, user.status)
+    }
+
     fun login(request: LoginRequest): String {
         val user = userRepository.findByEmail(request.email.trim().lowercase(Locale.ROOT))
             ?: throw AppException("Email atau password salah", HttpStatus.UNAUTHORIZED)

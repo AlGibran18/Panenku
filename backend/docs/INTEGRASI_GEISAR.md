@@ -78,3 +78,8 @@ Lihat git status -sb. Bila branch kelompok masih commit 2d26973, commit itu suda
 Build menggunakan toolchain JDK 17 dan target bytecode Kotlin JVM 17, mengikuti target Java awal proyek Geisar. Spring Boot 3.5.7 dan dependensi yang digunakan mendukung Java 17. Tidak perlu mengubah instalasi Java milik anggota tim lain.
 
 Untuk Windows, pilih instalasi JDK 17 di Gradle JDK Android Studio. Terminal memakai JAVA_HOME sendiri; arahkan ke folder JDK 17 yang benar lalu jalankan .\gradlew.bat --version. Gradle tetap versi 8.14.3. Setelah Docker Desktop menunjukkan Engine running, jalankan .\gradlew.bat test dari folder backend. Mengubah JAVA_HOME pada sesi PowerShell hanya berlaku untuk sesi tersebut.
+
+
+## Audit kontrak API aktif
+
+README utama kini berisi endpoint yang sudah tersedia; spesifikasi target dan diagram berada di RANCANGAN_MVP.md. GET /auth/me mengambil role/status dari database setelah login. JSON rupiah pecahan/null ditolak, respons error diseragamkan, validasi JWT memerlukan UUID/exp/HS256, pencarian tidak mengikuti locale OS, dan helper storage menolak operasi dengan 503 sampai implementasi penyimpanan tersedia. Rincian serta bukti pengujian tercatat di AUDIT_BACKEND.md.

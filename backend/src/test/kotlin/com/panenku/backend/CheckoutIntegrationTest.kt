@@ -52,10 +52,18 @@ class CheckoutIntegrationTest {
             registry.add("spring.datasource.password", postgres::getPassword)
         }
     }
-    @TestConfiguration class FixedTime {
-        @Bean @Primary fun fixedClock(): Clock = Clock.fixed(Instant.parse("2026-11-10T00:00:00Z"), ZoneOffset.UTC)
+    class TestClock : Clock() {
+        val time = java.util.concurrent.atomic.AtomicReference(Instant.parse("2026-11-10T00:00:00Z"))
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = Clock.fixed(time.get(), zone)
+        override fun instant(): Instant = time.get()
     }
+    @TestConfiguration class FixedTime {
+        @Bean @Primary fun fixedClock(): Clock = TestClock()
+    }
+    @Autowired lateinit var clock: Clock
     @Autowired lateinit var db: JdbcTemplate
+    @Autowired lateinit var jwtProvider: com.panenku.backend.common.auth.JwtProvider
     @Autowired lateinit var expiration: com.panenku.backend.scheduler.OrderExpirationService
     @Autowired lateinit var orderRepository: com.panenku.backend.modules.pembeli.repository.OrderRepository
     @Autowired lateinit var appConfig: com.panenku.backend.config.AppConfig
@@ -74,6 +82,7 @@ class CheckoutIntegrationTest {
     val secondProduct = UUID.fromString("00000000-0000-0000-0000-000000000007")
     val date = LocalDate.parse("2026-11-12")
     @BeforeEach fun seed() {
+        (clock as TestClock).time.set(Instant.parse("2026-11-10T00:00:00Z"))
         db.execute("TRUNCATE order_status_history, stock_reservations, order_items, orders, cart, products, commodities, farmer_payment_methods, farmer_profiles, users CASCADE")
         listOf(buyer to "pembeli", otherBuyer to "pembeli", farmer to "petani", otherFarmer to "petani").forEach { (id, role) ->
             db.update("INSERT INTO users(id,email,password_hash,role) VALUES (?,?,?,?)", id, "$id@example.test", "dummy-hash", role)
@@ -94,7 +103,7 @@ class CheckoutIntegrationTest {
         listOf(CheckoutItemRequest(product, BigDecimal(quantity), price)), "pickup", date, "08:00-10:00", 0)
     fun count(table: String): Long = db.queryForObject("SELECT count(*) FROM $table", Long::class.java)!!
     fun reserved(): BigDecimal = db.queryForObject("SELECT stock_reserved FROM products WHERE id=?", BigDecimal::class.java, product)!!
-    fun parallel(first: () -> OrderDTO, second: () -> OrderDTO): List<Result<OrderDTO>> {
+    fun <T> parallel(first: () -> T, second: () -> T): List<Result<T>> {
         val pool = Executors.newFixedThreadPool(2)
         val ready = CountDownLatch(2); val start = CountDownLatch(1)
         try {
@@ -187,6 +196,130 @@ class CheckoutIntegrationTest {
         assertEquals(86400000L, appConfig.jwt.expiration)
         assertEquals("localhost:9000", appConfig.minio.endpoint)
         assertEquals("panenku-files", appConfig.minio.bucket)
+    }
+
+    @Test fun `audit fractional rupiah and null or missing fee are rejected`() {
+        val requestJson = mapper.readTree(mapper.writeValueAsString(request())) as com.fasterxml.jackson.databind.node.ObjectNode
+        val invalidBodies = listOf(
+            requestJson.deepCopy().apply { put("expectedDeliveryFee", 0.9) },
+            requestJson.deepCopy().apply { putNull("expectedDeliveryFee") },
+            requestJson.deepCopy().apply { remove("expectedDeliveryFee") },
+            requestJson.deepCopy().apply { (get("items")[0] as com.fasterxml.jackson.databind.node.ObjectNode).put("expectedPricePerKg", 12000.9) }
+        )
+        invalidBodies.forEachIndexed { i, body ->
+            mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
+                .header("Idempotency-Key", "audit-numeric-$i").contentType(MediaType.APPLICATION_JSON).content(body.toString()))
+                .andExpect(status().isBadRequest).andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+        }
+        assertEquals(0L, count("orders"))
+    }
+    @Test fun `audit missing idempotency header returns documented JSON error`() {
+        mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request())))
+            .andExpect(status().isBadRequest).andExpect(jsonPath("$.success").value(false)).andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+    }
+    @Test fun `audit authentication failures return JSON and retain bearer challenge`() {
+        listOf(null, "Bearer forged").forEach { authorizationHeader ->
+            val req = get("/api/v1/buyer/cart")
+            if (authorizationHeader != null) req.header("Authorization", authorizationHeader)
+            mvc.perform(req).andExpect(status().isUnauthorized).andExpect(header().exists("WWW-Authenticate"))
+                .andExpect(jsonPath("$.success").value(false)).andExpect(jsonPath("$.code").value("UNAUTHORIZED"))
+        }
+    }
+    @Test fun `audit JWT helper rejects token without expiration`() {
+        val token = SignedJWT(JWSHeader(JWSAlgorithm.HS256), JWTClaimsSet.Builder().subject(buyer.toString()).issuer("panenku").build())
+        token.sign(MACSigner("test-only-32-byte-secret-for-tests-123456789"))
+        assertFalse(jwtProvider.validateToken(token.serialize()))
+    }
+    @Test fun `audit catalog filters invalid farmer role and uses locale independent search`() {
+        val previous = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+            assertEquals(1, catalog.list("SAWI", null, "price_asc", 0, 20).items.size)
+        } finally { java.util.Locale.setDefault(previous) }
+        db.update("UPDATE users SET role='pembeli' WHERE id=?", farmer)
+        assertEquals(0L, catalog.list("", null, "price_asc", 0, 20).totalElements)
+    }
+    @Test fun `audit unconfigured storage never reports a successful upload or deletion`() {
+        val storage = com.panenku.backend.common.storage.FileStorage()
+        val file = org.springframework.mock.web.MockMultipartFile("file", "dummy.jpg", "image/jpeg", byteArrayOf(1, 2, 3))
+        val upload = assertThrows(ApiException::class.java) { storage.upload("payment", file) }
+        assertEquals(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, upload.status)
+        val deletion = assertThrows(ApiException::class.java) { storage.delete("payment/dummy.jpg") }
+        assertEquals(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, deletion.status)
+    }
+    @Test fun `audit independent buyers may use the same idempotency key`() {
+        val results = parallel({ checkout.checkout(buyer, "client-key", request()) }, { checkout.checkout(otherBuyer, "client-key", request()) })
+        assertTrue(results.all { it.isSuccess }, results.toString())
+        assertNotEquals(results[0].getOrThrow().orderId, results[1].getOrThrow().orderId)
+        assertEquals(2L, count("orders")); assertEquals(BigDecimal("1.50"), reserved())
+    }
+    @Test fun `audit checkout racing with expiration cannot corrupt stock`() {
+        db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)
+        val old = checkout.checkout(buyer, "audit-old", request())
+        val results = parallel(
+            { assertTrue(expiration.expire(old.orderId, farmer, old.expiresAt)); old },
+            { checkout.checkout(otherBuyer, "audit-new", request()) }
+        )
+        assertTrue(results[0].isSuccess, results.toString())
+        if (results[1].isFailure) assertTrue(results[1].exceptionOrNull() is ApiException)
+        val active = db.queryForObject("SELECT coalesce(sum(quantity_kg),0) FROM stock_reservations WHERE product_id=? AND status='active'", BigDecimal::class.java, product)!!
+        assertEquals(0, active.compareTo(reserved()))
+        assertTrue(active <= BigDecimal.ONE)
+        assertEquals("released", db.queryForObject("SELECT status FROM stock_reservations WHERE order_id=?", String::class.java, old.orderId))
+        assertEquals(BigDecimal("1.00"), db.queryForObject("SELECT stock_physical FROM products WHERE id=?", BigDecimal::class.java, product))
+    }
+
+    @Test fun `audit me returns current role and status without credentials`() {
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()).claim("role", "admin") }))
+            .andExpect(status().isOk).andExpect(jsonPath("$.data.id").value(buyer.toString()))
+            .andExpect(jsonPath("$.data.role").value("pembeli")).andExpect(jsonPath("$.data.status").value("active"))
+            .andExpect(jsonPath("$.data.passwordHash").doesNotExist())
+        db.update("UPDATE users SET status='suspended' WHERE id=?", buyer)
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isOk).andExpect(jsonPath("$.data.status").value("suspended"))
+        mvc.perform(get("/api/v1/buyer/cart").with(jwt().jwt { it.subject(buyer.toString()) })).andExpect(status().isForbidden)
+        db.update("DELETE FROM users WHERE id=?", buyer)
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()) })).andExpect(status().isUnauthorized)
+    }
+    @Test fun `audit invalid or absent JWT subject is unauthorized`() {
+        listOf(null, "not-a-uuid").forEach { subject ->
+            val claims = JWTClaimsSet.Builder().issuer("panenku").expirationTime(Date.from(Instant.parse("2026-11-10T01:00:00Z")))
+            if (subject != null) claims.subject(subject)
+            val token = SignedJWT(JWSHeader(JWSAlgorithm.HS256), claims.build())
+            token.sign(MACSigner("test-only-32-byte-secret-for-tests-123456789"))
+            assertFalse(jwtProvider.validateToken(token.serialize()))
+            mvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + token.serialize()))
+                .andExpect(status().isUnauthorized).andExpect(jsonPath("$.code").value("UNAUTHORIZED"))
+        }
+    }
+    @Test fun `audit HTTP routing errors have stable JSON responses`() {
+        mvc.perform(put("/api/v1/auth/login").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+            .andExpect(status().isMethodNotAllowed).andExpect(header().string("Allow", org.hamcrest.Matchers.containsString("POST")))
+            .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED"))
+        mvc.perform(post("/api/v1/buyer/cart/items").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.TEXT_PLAIN).content("not JSON"))
+            .andExpect(status().isUnsupportedMediaType).andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"))
+        mvc.perform(get("/api/v1/buyer/not-implemented").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isNotFound).andExpect(jsonPath("$.code").value("NOT_FOUND"))
+    }
+
+    @Test fun `audit concurrent registrations cannot duplicate email or profile`() {
+        val body = """{"email":"audit.race@example.test","password":"password123","role":"pembeli","fullName":"Nama"}"""
+        val results = parallel({ register(body).andReturn().response.status }, { register(body).andReturn().response.status })
+        assertTrue(results.all { it.isSuccess }, results.toString())
+        assertEquals(listOf(201, 409), results.map { it.getOrThrow() }.sorted())
+        assertEquals(5L, count("users")); assertEquals(1L, count("buyer_profiles"))
+    }
+
+    @Test fun `audit first checkout and persisted replay have identical timestamp precision`() {
+        (clock as TestClock).time.set(Instant.parse("2026-11-10T00:00:00.123456789Z"))
+        val first = checkout.checkout(buyer, "audit-microseconds", request())
+        val replay = checkout.checkout(buyer, "audit-microseconds", request())
+        assertEquals(first, replay)
+        assertEquals(Instant.parse("2026-11-11T00:00:00.123456Z"), first.expiresAt)
+        assertEquals(1L, count("orders")); assertEquals(BigDecimal("0.75"), reserved())
     }
     @Test fun `UAT04 two buyers cannot oversell last kilogram`() {
         db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)
@@ -383,9 +516,9 @@ class CheckoutIntegrationTest {
         db.execute("CREATE FUNCTION test_fail_profile() RETURNS TRIGGER LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''simulated profile failure''; END;'")
         db.execute("CREATE TRIGGER test_profile_failure BEFORE INSERT ON buyer_profiles FOR EACH ROW EXECUTE FUNCTION test_fail_profile()")
         try {
-            assertThrows(Exception::class.java) {
-                register("""{"email":"rollback@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""")
-            }
+            register("""{"email":"rollback@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""")
+                .andExpect(status().isInternalServerError).andExpect(jsonPath("$.code").value("INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.message").value("Terjadi kesalahan server. Silakan coba lagi."))
             assertEquals(4L, count("users")); assertEquals(0L, count("buyer_profiles"))
         } finally { db.execute("DROP TRIGGER test_profile_failure ON buyer_profiles"); db.execute("DROP FUNCTION test_fail_profile()") }
     }

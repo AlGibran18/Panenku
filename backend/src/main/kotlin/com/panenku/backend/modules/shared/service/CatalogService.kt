@@ -9,6 +9,7 @@ import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
+import java.util.Locale
 
 @Service
 @Transactional(readOnly = true)
@@ -19,7 +20,7 @@ class CatalogService(
     fun list(search: String, commodityId: UUID?, sort: String, page: Int, size: Int): PageDTO<ProductDTO> {
         if (page < 0 || size !in 1..100 || search.length > 100) invalid("Paginasi atau pencarian tidak valid.")
         val direction = when (sort) { "price_asc" -> Sort.Direction.ASC; "price_desc" -> Sort.Direction.DESC; else -> invalid("Urutan harus price_asc atau price_desc.") }
-        val escaped = search.trim().lowercase().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        val escaped = search.trim().lowercase(Locale.ROOT).replace("!", "!!").replace("%", "!%").replace("_", "!_")
         val result = products.catalog(commodityId, "%$escaped%", PageRequest.of(page, size, Sort.by(direction, "pricePerKg").and(Sort.by("id"))))
         return PageDTO(result.content.map(::dto), page, size, result.totalElements)
     }

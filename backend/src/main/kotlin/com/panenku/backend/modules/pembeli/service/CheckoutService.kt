@@ -15,6 +15,7 @@ import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 @Service
@@ -72,7 +73,8 @@ class CheckoutService(
         val limit = settings.lockByKey("transaction_limit")?.value?.toLongOrNull()?.takeIf { it > 0 } ?: conflict("Limit transaksi belum dikonfigurasi dengan benar.")
         val subtotals = locked.mapIndexed { index, p -> CheckoutMath.item(normalized.items[index].quantityKg, p.pricePerKg) }
         val total = CheckoutMath.total(subtotals, fee, limit)
-        val now = Instant.now(clock)
+        // PostgreSQL TIMESTAMPTZ stores microseconds; keep first response identical to later replays.
+        val now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS)
         val order = orders.saveAndFlush(Order(buyerId = actor, farmerId = farmerId, fulfillmentMethod = request.fulfillmentMethod,
             deliveryFee = fee, subtotalItems = total - fee, totalPayment = total, transactionLimitApplied = limit,
             scheduledDate = request.scheduledDate, scheduledTimeSlot = request.scheduledTimeSlot,
