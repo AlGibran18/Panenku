@@ -666,7 +666,7 @@ classDiagram
     AuthController ..> AuthService : uses
     AuthService ..> UserRepository : uses
     AuthService ..> User : manages
-    UserRepository <|..| User : Spring Data JPA for
+    UserRepository ..> User : persists
     
     %% ================================================================
     %% CORE DOMAIN: USER & PROFILES (1:1)
@@ -878,13 +878,13 @@ classDiagram
     
     class CheckoutController {
         <<REST Controller>>
-        +POST /checkout
+        +checkout(CheckoutRequest)
     }
     
     class OrderController {
         <<REST Controller>>
-        +GET /orders
-        +PUT /orders/{id}/status
+        +listOrders()
+        +updateStatus(UUID, FulfillmentUpdateRequest)
     }
     
     CheckoutController ..> CheckoutService : calls
@@ -928,7 +928,7 @@ classDiagram
     
     class CheckoutRequest {
         <<DTO>>
-        -items: List<CartItemRequest>
+        -items: List~CheckoutItemRequest~
         -fulfillmentMethod: String
         -scheduledDate: LocalDate
     }
@@ -954,7 +954,7 @@ classDiagram
 | `<<JpaRepository>>` | Interface Spring Data JPA untuk akses DB | `UserRepository`, `OrderRepository` |
 | `<<DTO>>` | Data Transfer Object untuk request/response | `CheckoutRequest`, `OrderDTO` |
 | `<<Utility>>` / `<<Filter>>` / `<<Controller Advice>>` | Komponen penunjang umum | `JwtProvider`, `RoleGuard`, `ExceptionHandler` |
-| `--|>` | Inheritance / Implementasi | `UserRepository <|..| User` |
+| `..|>` | Implementasi interface | `UserRepository ..|> JpaRepository` |
 | `*--` | Komposisi (milik, tidak bisa berdiri sendiri) | `Order *-- OrderItem` |
 | `o--` | Asosiasi (terhubung tapi independen) | `User o-- FarmerProfile` |
 | `..>` | Dependency / penggunaan | `Controller ..> Service` |
