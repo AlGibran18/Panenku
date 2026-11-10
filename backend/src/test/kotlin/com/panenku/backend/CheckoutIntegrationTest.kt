@@ -1,0 +1,247 @@
+package com.panenku.backend
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.nimbusds.jose.JWSAlgorithm
+import com.nimbusds.jose.JWSHeader
+import com.nimbusds.jose.crypto.MACSigner
+import com.nimbusds.jwt.JWTClaimsSet
+import com.nimbusds.jwt.SignedJWT
+import java.util.Date
+import com.panenku.backend.common.exception.ApiException
+import com.panenku.backend.modules.pembeli.dto.*
+import com.panenku.backend.modules.pembeli.service.*
+import com.panenku.backend.modules.petani.dto.ProductRequest
+import com.panenku.backend.modules.petani.service.ProductService
+import com.panenku.backend.modules.shared.service.CatalogService
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.context.TestConfiguration
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Import
+import org.springframework.context.annotation.Primary
+import org.springframework.http.MediaType
+import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt
+import org.springframework.test.context.DynamicPropertyRegistry
+import org.springframework.test.context.DynamicPropertySource
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.*
+import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.junit.jupiter.Container
+import org.testcontainers.junit.jupiter.Testcontainers
+import java.math.BigDecimal
+import java.time.*
+import java.util.UUID
+import java.util.concurrent.*
+
+@SpringBootTest(properties = ["panenku.jwt.secret=test-only-32-byte-secret-for-tests-123456789", "panenku.jwt.issuer=panenku"])
+@AutoConfigureMockMvc
+@Testcontainers
+@Import(CheckoutIntegrationTest.FixedTime::class)
+class CheckoutIntegrationTest {
+    companion object {
+        @Container @JvmStatic val postgres = PostgreSQLContainer<Nothing>("postgres:16-alpine")
+        @DynamicPropertySource @JvmStatic fun database(registry: DynamicPropertyRegistry) {
+            registry.add("spring.datasource.url", postgres::getJdbcUrl)
+            registry.add("spring.datasource.username", postgres::getUsername)
+            registry.add("spring.datasource.password", postgres::getPassword)
+        }
+    }
+    @TestConfiguration class FixedTime {
+        @Bean @Primary fun fixedClock(): Clock = Clock.fixed(Instant.parse("2026-11-10T00:00:00Z"), ZoneOffset.UTC)
+    }
+    @Autowired lateinit var db: JdbcTemplate
+    @Autowired lateinit var checkout: CheckoutService
+    @Autowired lateinit var cart: CartService
+    @Autowired lateinit var productService: ProductService
+    @Autowired lateinit var catalog: CatalogService
+    @Autowired lateinit var mvc: MockMvc
+    @Autowired lateinit var mapper: ObjectMapper
+    val buyer = UUID.fromString("00000000-0000-0000-0000-000000000001")
+    val otherBuyer = UUID.fromString("00000000-0000-0000-0000-000000000002")
+    val farmer = UUID.fromString("00000000-0000-0000-0000-000000000003")
+    val otherFarmer = UUID.fromString("00000000-0000-0000-0000-000000000004")
+    val commodity = UUID.fromString("00000000-0000-0000-0000-000000000005")
+    val product = UUID.fromString("00000000-0000-0000-0000-000000000006")
+    val secondProduct = UUID.fromString("00000000-0000-0000-0000-000000000007")
+    val date = LocalDate.parse("2026-11-12")
+    @BeforeEach fun seed() {
+        db.execute("TRUNCATE order_status_history, stock_reservations, order_items, orders, cart, products, commodities, farmer_payment_methods, farmer_profiles, users CASCADE")
+        listOf(buyer to "pembeli", otherBuyer to "pembeli", farmer to "petani", otherFarmer to "petani").forEach { (id, role) ->
+            db.update("INSERT INTO users(id,email,password_hash,role) VALUES (?,?,?,?)", id, "$id@example.test", "dummy-hash", role)
+        }
+        listOf(farmer, otherFarmer).forEach { id ->
+            db.update("INSERT INTO farmer_profiles(id,store_name,pickup_location,service_area,delivery_fee,shipping_enabled,ktp_status,time_slots) VALUES (?,?,?,'kepanjen|dau',10000,true,'disetujui','08:00-10:00|13:00-15:00')", id, "Toko $id", "Lokasi $id")
+            db.update("INSERT INTO farmer_payment_methods(id,farmer_id,method_type,bank_name,account_number,account_holder_name) VALUES (?,?,'bank_transfer','Bank Dummy','00123','Petani Dummy')", UUID.randomUUID(), id)
+        }
+        db.update("INSERT INTO commodities(id,name) VALUES (?,'Tomat')", commodity)
+        addProduct(product, farmer, "Tomat Segar", "10.00", 12000)
+        addProduct(secondProduct, farmer, "Sawi", "10.00", 8000)
+        db.update("INSERT INTO settings(key,value) VALUES ('transaction_limit','10000000') ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value")
+    }
+    fun addProduct(id: UUID, owner: UUID, name: String, stock: String, price: Long) {
+        db.update("INSERT INTO products(id,farmer_id,commodity_id,name,photo_url,price_per_kg,stock_physical,ready_date,publication_status) VALUES (?,?,?,?,?,?,?,'2026-11-12','aktif')", id, owner, commodity, name, "products/dummy.jpg", price, BigDecimal(stock))
+    }
+    fun request(quantity: String = "0.75", price: Long = 12000): CheckoutRequest = CheckoutRequest(
+        listOf(CheckoutItemRequest(product, BigDecimal(quantity), price)), "pickup", date, "08:00-10:00", 0)
+    fun count(table: String): Long = db.queryForObject("SELECT count(*) FROM $table", Long::class.java)!!
+    fun reserved(): BigDecimal = db.queryForObject("SELECT stock_reserved FROM products WHERE id=?", BigDecimal::class.java, product)!!
+    fun parallel(first: () -> OrderDTO, second: () -> OrderDTO): List<Result<OrderDTO>> {
+        val pool = Executors.newFixedThreadPool(2)
+        val ready = CountDownLatch(2); val start = CountDownLatch(1)
+        try {
+            val futures = listOf(first, second).map { task -> pool.submit(Callable { ready.countDown(); start.await(); runCatching(task) }) }
+            assertTrue(ready.await(5, TimeUnit.SECONDS)); start.countDown()
+            return futures.map { it.get(20, TimeUnit.SECONDS) }
+        } finally { pool.shutdownNow() }
+    }
+    @Test fun `UAT04 two buyers cannot oversell last kilogram`() {
+        db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)
+        val results = parallel({ checkout.checkout(buyer, "race-1", request()) }, { checkout.checkout(otherBuyer, "race-2", request()) })
+        assertEquals(1, results.count { it.isSuccess }); assertEquals(1L, count("orders")); assertEquals(1L, count("stock_reservations"))
+        assertEquals(BigDecimal("0.75"), reserved())
+        assertTrue(results.single { it.isFailure }.exceptionOrNull() is ApiException)
+    }
+    @Test fun `UAT18 concurrent retries create only one order and reservation`() {
+        val results = parallel({ checkout.checkout(buyer, "same-key", request()) }, { checkout.checkout(buyer, "same-key", request()) })
+        assertTrue(results.all { it.isSuccess }, results.toString())
+        assertEquals(results[0].getOrThrow().orderId, results[1].getOrThrow().orderId)
+        assertEquals(1L, count("orders")); assertEquals(1L, count("stock_reservations")); assertEquals(1L, count("order_status_history"))
+        assertEquals(BigDecimal("0.75"), reserved())
+    }
+    @Test fun `reusing idempotency key with different payload is rejected`() {
+        checkout.checkout(buyer, "unique", request())
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "unique", request("0.50")) }
+        assertEquals(1L, count("orders"))
+    }
+    @Test fun `UAT05 totals use exact kg and pickup is free`() {
+        val req = request("2.5").copy(items = listOf(CheckoutItemRequest(product, BigDecimal("2.5"), 12000), CheckoutItemRequest(secondProduct, BigDecimal("1.25"), 8000)),
+            fulfillmentMethod = "delivery", expectedDeliveryFee = 10000, deliveryAddress = "Alamat dummy", deliveryDistrict = "kepanjen")
+        val result = checkout.checkout(buyer, "delivery", req)
+        assertEquals(40000L, result.subtotalItems); assertEquals(50000L, result.totalPayment)
+        assertEquals(2L, count("stock_reservations"))
+        assertEquals(Instant.parse("2026-11-11T00:00:00Z"), result.expiresAt)
+        assertEquals(0L, checkout.checkout(otherBuyer, "pickup", request()).deliveryFee)
+    }
+    @Test fun `UAT06 exact limit works and excess fee leaves no partial order`() {
+        db.update("UPDATE products SET price_per_kg=10000000 WHERE id=?", product)
+        assertEquals(10000000L, checkout.checkout(buyer, "at-limit", request("1", 10000000)).totalPayment)
+        val invalid = request("1", 10000000).copy(fulfillmentMethod = "delivery", expectedDeliveryFee = 10000, deliveryAddress = "Alamat", deliveryDistrict = "kepanjen")
+        assertThrows(ApiException::class.java) { checkout.checkout(otherBuyer, "above-limit", invalid) }
+        assertEquals(1L, count("orders")); assertEquals(BigDecimal("1.00"), reserved())
+    }
+    @Test fun `UAT03 and UAT07 reject early date missing slot out of area and disabled delivery`() {
+        val requests = listOf(request().copy(scheduledDate = date.minusDays(1)), request().copy(scheduledTimeSlot = "09:00-11:00"),
+            request().copy(fulfillmentMethod = "delivery", expectedDeliveryFee = 10000, deliveryAddress = "Alamat", deliveryDistrict = "outside"))
+        requests.forEachIndexed { i, req -> assertThrows(ApiException::class.java) { checkout.checkout(buyer, "invalid-$i", req) } }
+        db.update("UPDATE farmer_profiles SET shipping_enabled=false WHERE id=?", farmer)
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "disabled", request().copy(fulfillmentMethod = "delivery", expectedDeliveryFee = 10000, deliveryAddress = "Alamat", deliveryDistrict = "kepanjen")) }
+        assertEquals(0L, count("orders")); assertEquals(BigDecimal("0.00"), reserved())
+    }
+    @Test fun `UAT11 stored snapshots survive product and profile changes and replay`() {
+        val first = checkout.checkout(buyer, "snapshot", request())
+        db.update("UPDATE products SET name='Changed',price_per_kg=15000,ready_date='2026-11-20' WHERE id=?", product)
+        db.update("UPDATE farmer_profiles SET delivery_fee=20000,pickup_location='New location' WHERE id=?", farmer)
+        db.update("UPDATE settings SET value='100' WHERE key='transaction_limit'")
+        assertEquals(first, checkout.checkout(buyer, "snapshot", request()))
+        assertThrows(Exception::class.java) { db.update("UPDATE orders SET delivery_fee=1,total_payment=total_payment+1 WHERE id=?", first.orderId) }
+        assertThrows(Exception::class.java) { db.update("UPDATE order_items SET product_name_snapshot='tampered' WHERE order_id=?", first.orderId) }
+    }
+    @Test fun `changed price or delivery fee requires buyer consent`() {
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "old-price", request(price = 11000)) }
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "old-fee", request().copy(fulfillmentMethod = "delivery", expectedDeliveryFee = 0, deliveryAddress = "Alamat", deliveryDistrict = "kepanjen")) }
+        assertEquals(0L, count("orders")); assertEquals(BigDecimal("0.00"), reserved())
+    }
+    @Test fun `one unavailable item rejects the whole checkout`() {
+        db.update("UPDATE products SET stock_physical=0 WHERE id=?", secondProduct)
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "partial", request().copy(items = request().items + CheckoutItemRequest(secondProduct, BigDecimal.ONE, 8000))) }
+        assertEquals(0L, count("orders")); assertEquals(0L, count("order_items")); assertEquals(0L, count("stock_reservations")); assertEquals(BigDecimal("0.00"), reserved())
+    }
+    @Test fun `database failure after inserting order rolls back all writes`() {
+        db.execute("CREATE FUNCTION test_fail_reservation() RETURNS TRIGGER LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''simulated storage failure''; END;'")
+        db.execute("CREATE TRIGGER test_failure BEFORE INSERT ON stock_reservations FOR EACH ROW EXECUTE FUNCTION test_fail_reservation()")
+        try {
+            assertThrows(Exception::class.java) { checkout.checkout(buyer, "db-failure", request()) }
+            assertEquals(0L, count("orders")); assertEquals(0L, count("order_items")); assertEquals(0L, count("stock_reservations")); assertEquals(0L, count("order_status_history")); assertEquals(BigDecimal("0.00"), reserved())
+        } finally {
+            db.execute("DROP TRIGGER test_failure ON stock_reservations"); db.execute("DROP FUNCTION test_fail_reservation()")
+        }
+    }
+    @Test fun `UAT16 old cart cannot bypass farmer suspension`() {
+        cart.add(buyer, CartItemRequest(product, BigDecimal.ONE))
+        db.update("UPDATE users SET status='suspended' WHERE id=?", farmer)
+        assertFalse(cart.get(buyer).items.single().available)
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "suspended", request()) }
+        assertEquals(0L, catalog.list("", null, "price_asc", 0, 20).totalElements)
+        assertEquals(0L, count("orders"))
+    }
+    @Test fun `cart persists quantities recalculates and does not reserve stock`() {
+        val item = cart.add(buyer, CartItemRequest(product, BigDecimal("2.5"))).items.single()
+        assertEquals(BigDecimal("30000"), cart.get(buyer).subtotalItems)
+        assertEquals(BigDecimal("0.00"), reserved())
+        cart.update(buyer, item.id, BigDecimal("1.25"))
+        assertEquals(BigDecimal("15000"), cart.get(buyer).subtotalItems)
+        assertThrows(ApiException::class.java) { cart.update(otherBuyer, item.id, BigDecimal.ONE) }
+        cart.delete(buyer, item.id); assertTrue(cart.get(buyer).items.isEmpty())
+    }
+    @Test fun `mixed farmer and duplicate product checkout are rejected`() {
+        db.update("UPDATE products SET farmer_id=? WHERE id=?", otherFarmer, secondProduct)
+        cart.add(buyer, CartItemRequest(product, BigDecimal.ONE))
+        assertThrows(ApiException::class.java) { cart.add(buyer, CartItemRequest(secondProduct, BigDecimal.ONE)) }
+        assertEquals(1, cart.get(buyer).items.size)
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "mixed", request().copy(items = request().items + CheckoutItemRequest(secondProduct, BigDecimal.ONE, 8000))) }
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "duplicate", request().copy(items = request().items + request().items)) }
+        assertEquals(0L, count("orders"))
+    }
+    @Test fun `UAT02 unverified farmer can save draft but cannot publish`() {
+        db.update("UPDATE farmer_profiles SET ktp_status='menunggu' WHERE id=?", farmer)
+        val req = ProductRequest(commodity, "Draft", 10000, BigDecimal.ONE, date, photoUrl = "products/dummy.jpg")
+        assertEquals("draft", productService.save(farmer, null, req).publicationStatus)
+        assertThrows(ApiException::class.java) { productService.save(farmer, null, req.copy(publicationStatus = "aktif")) }
+        assertThrows(ApiException::class.java) { checkout.checkout(buyer, "unverified", request()) }
+    }
+    @Test fun `product ownership and reserved stock floor are enforced`() {
+        checkout.checkout(buyer, "reserve", request())
+        val req = ProductRequest(commodity, "Updated", 12000, BigDecimal("0.5"), date, "aktif", photoUrl = "products/dummy.jpg")
+        assertThrows(ApiException::class.java) { productService.save(farmer, product, req) }
+        assertThrows(ApiException::class.java) { productService.save(otherFarmer, product, req.copy(stockPhysical = BigDecimal.TEN)) }
+        assertEquals(BigDecimal("0.75"), reserved())
+    }
+    @Test fun `catalog searches commodities and stores filters and sorts price`() {
+        assertEquals(2, catalog.list("tomat", commodity, "price_asc", 0, 20).items.size)
+        assertEquals(secondProduct, catalog.list("Toko", null, "price_asc", 0, 20).items.first().id)
+        assertEquals(product, catalog.list("", null, "price_desc", 0, 20).items.first().id)
+        assertEquals(0, catalog.list("%", null, "price_asc", 0, 20).items.size)
+    }
+
+    @Test fun `JWT signature issuer and expiration are validated by the real decoder`() {
+        fun token(secret: String = "test-only-32-byte-secret-for-tests-123456789", issuer: String = "panenku", expiry: Instant? = Instant.now().plusSeconds(3600)): String {
+            val claims = JWTClaimsSet.Builder().subject(buyer.toString()).issuer(issuer)
+            if (expiry != null) claims.expirationTime(Date.from(expiry))
+            val signed = SignedJWT(JWSHeader(JWSAlgorithm.HS256), claims.build())
+            signed.sign(MACSigner(secret))
+            return signed.serialize()
+        }
+        mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer " + token())).andExpect(status().isOk)
+        listOf(token(issuer = "wrong"), token(expiry = Instant.now().minusSeconds(3600)), token(expiry = null),
+            token(secret = "another-test-only-32-byte-secret-123456789")).forEach {
+            mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer $it")).andExpect(status().isUnauthorized)
+        }
+    }
+    @Test fun `HTTP public catalog and protected buyer operations respect database roles`() {
+        mvc.perform(get("/api/v1/buyer/products")).andExpect(status().isOk)
+        mvc.perform(get("/api/v1/buyer/cart")).andExpect(status().isUnauthorized)
+        mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer forged")).andExpect(status().isUnauthorized)
+        mvc.perform(get("/api/v1/buyer/cart").with(jwt().jwt { it.subject(farmer.toString()).claim("role", "pembeli") })).andExpect(status().isForbidden)
+        mvc.perform(post("/api/v1/admin/commodities").with(jwt().jwt { it.subject(buyer.toString()).claim("role", "admin") })
+            .contentType(MediaType.APPLICATION_JSON).content("""{"name":"Cabai"}""")).andExpect(status().isForbidden)
+        mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
+            .header("Idempotency-Key", "http-checkout").contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request())))
+            .andExpect(status().isCreated).andExpect(jsonPath("$.data.orderStatus").value("menunggu_petani"))
+    }
+}

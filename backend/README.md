@@ -6,6 +6,10 @@ Dikembangkan sebagai tugas akhir praktikum Pengembangan Aplikasi Perangkat Berge
 
 ---
 
+## Status implementasi bagian Gibran
+
+Implementasi awal katalog/produk, keranjang, jadwal, dan checkout atomik tersedia di branch `backend`. Baca [panduan implementasi Gibran](docs/IMPLEMENTASI_GIBRAN.md) untuk cara menjalankan, perubahan kontrak checkout, pengujian PostgreSQL, dan integrasi dengan bagian Rampan. Diagram serta daftar fitur di bawah merupakan spesifikasi target; belum semua modul MVP diimplementasikan.
+
 ## 📋 Ringkasan Proyek
 
 | Item | Detail |
@@ -1273,21 +1277,24 @@ Content-Type: application/json
 ## 🚀 Cara Menjalankan
 
 ### Prasyarat
-- JDK 17+
+- JDK 21 (untuk konfigurasi build saat ini)
 - Docker & Docker Compose (untuk PostgreSQL & MinIO)
 - Gradle
 
 ### Menjalankan dengan Docker Compose
 
 ```bash
-cd /Users/geisarrampan/AndroidStudioProjects/Panenku/backend
+cd backend
 
-# Jalankan database dan storage
-docker-compose up -d
+# Siapkan .env dari .env.example, isi DB_PASSWORD dan JWT_SECRET
+cp .env.example .env
+# Jalankan PostgreSQL
+docker compose up -d
+# Export variabel .env di shell atau atur environment pada IDE sebelum bootRun
 
 # Build dan jalankan aplikasi
 ./gradlew build
-./gradlew run
+./gradlew bootRun
 ```
 
 ### Environment Variable (contoh `.env`)
