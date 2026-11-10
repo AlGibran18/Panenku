@@ -1,6 +1,6 @@
 package com.panenku.backend.modules.petani.controller
 
-import com.panenku.backend.common.exception.ApiResponse
+import com.panenku.backend.common.dto.ApiResponse
 import com.panenku.backend.common.security.ActorService
 import com.panenku.backend.modules.petani.dto.ProductRequest
 import com.panenku.backend.modules.petani.service.ProductService

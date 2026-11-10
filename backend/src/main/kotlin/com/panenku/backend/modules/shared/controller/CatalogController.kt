@@ -1,6 +1,6 @@
 package com.panenku.backend.modules.shared.controller
 
-import com.panenku.backend.common.exception.ApiResponse
+import com.panenku.backend.common.dto.ApiResponse
 import com.panenku.backend.common.security.ActorService
 import com.panenku.backend.modules.shared.dto.CommodityRequest
 import com.panenku.backend.modules.shared.service.*

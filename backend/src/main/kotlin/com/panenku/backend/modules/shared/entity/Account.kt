@@ -3,19 +3,12 @@ package com.panenku.backend.modules.shared.entity
 import jakarta.persistence.*
 import java.util.UUID
 
-// Minimal integration mapping. Registration/profile/payment management belongs to Rampan.
-@Entity @Table(name = "users")
-class Account(
-    @Id var id: UUID = UUID.randomUUID(),
-    var email: String = "",
-    var role: String = "pembeli",
-    var status: String = "active"
-)
-
+// Shared profile mappings used by auth, catalog and checkout.
 @Entity @Table(name = "farmer_profiles")
 class FarmerProfile(
     @Id var id: UUID = UUID.randomUUID(),
     var storeName: String = "",
+    var contactPhone: String? = null,
     var pickupLocation: String? = null,
     var serviceArea: String = "",
     var deliveryFee: Long = 0,

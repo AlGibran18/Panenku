@@ -8,7 +8,7 @@ Dikembangkan sebagai tugas akhir praktikum Pengembangan Aplikasi Perangkat Berge
 
 ## Status implementasi bagian Gibran
 
-Implementasi awal katalog/produk, keranjang, jadwal, dan checkout atomik tersedia di branch `backend`. Baca [panduan implementasi Gibran](docs/IMPLEMENTASI_GIBRAN.md) untuk cara menjalankan, perubahan kontrak checkout, pengujian PostgreSQL, dan integrasi dengan bagian Rampan. Diagram serta daftar fitur di bawah merupakan spesifikasi target; belum semua modul MVP diimplementasikan.
+Implementasi katalog/produk, keranjang, jadwal, dan checkout atomik tersedia, serta sudah digabungkan dengan auth/register/login Geisar. Baca [catatan integrasi Geisar](docs/INTEGRASI_GEISAR.md) untuk konfigurasi bersama dan penanganan konflik. Baca [panduan implementasi Gibran](docs/IMPLEMENTASI_GIBRAN.md) untuk cara menjalankan, perubahan kontrak checkout, pengujian PostgreSQL, dan integrasi dengan bagian Rampan. Diagram serta daftar fitur di bawah merupakan spesifikasi target; belum semua modul MVP diimplementasikan.
 
 ## 📋 Ringkasan Proyek
 

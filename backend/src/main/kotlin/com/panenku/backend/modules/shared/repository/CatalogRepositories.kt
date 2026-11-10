@@ -8,11 +8,6 @@ import org.springframework.data.jpa.repository.*
 import org.springframework.data.repository.query.Param
 import java.util.UUID
 
-interface AccountRepository : JpaRepository<Account, UUID> {
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select a from Account a where a.id = :id")
-    fun lockById(@Param("id") id: UUID): Account?
-}
 interface FarmerProfileRepository : JpaRepository<FarmerProfile, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select f from FarmerProfile f where f.id = :id")
@@ -48,7 +43,7 @@ interface ProductRepository : JpaRepository<Product, UUID> {
     fun reference(@Param("id") id: UUID): ProductReference?
     fun findAllByFarmerId(farmerId: UUID, pageable: Pageable): Page<Product>
 
-    @Query("""select p from Product p, Account a, FarmerProfile f, Commodity c
+    @Query("""select p from Product p, User a, FarmerProfile f, Commodity c
         where p.farmerId = a.id and p.farmerId = f.id and p.commodityId = c.id
         and a.status = 'active' and f.ktpStatus = 'disetujui' and c.isActive = true
         and p.publicationStatus = 'aktif'

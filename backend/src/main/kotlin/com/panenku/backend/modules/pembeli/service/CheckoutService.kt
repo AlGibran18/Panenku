@@ -19,7 +19,7 @@ import java.util.UUID
 
 @Service
 class CheckoutService(
-    private val actors: ActorService, private val accounts: AccountRepository,
+    private val actors: ActorService, private val accounts: UserRepository,
     private val products: ProductRepository, private val commodities: CommodityRepository,
     private val farmers: FarmerProfileRepository, private val payments: PaymentMethodRepository,
     private val settings: SettingRepository, private val orders: OrderRepository,

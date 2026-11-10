@@ -10,7 +10,8 @@ import org.springframework.security.oauth2.jose.jws.MacAlgorithm
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator
 import org.springframework.security.oauth2.jwt.JwtClaimValidator
 import org.springframework.security.oauth2.jwt.JwtDecoder
-import org.springframework.security.oauth2.jwt.JwtValidators
+import org.springframework.security.oauth2.jwt.JwtIssuerValidator
+import org.springframework.security.oauth2.jwt.JwtTimestampValidator
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder
 import org.springframework.security.web.SecurityFilterChain
 import javax.crypto.spec.SecretKeySpec
@@ -22,12 +23,13 @@ class SecurityConfig {
     @Bean fun clock(): Clock = Clock.systemUTC()
 
     @Bean
-    fun jwtDecoder(@Value("\${panenku.jwt.secret}") secret: String, @Value("\${panenku.jwt.issuer}") issuer: String): JwtDecoder {
+    fun jwtDecoder(@Value("\${panenku.jwt.secret}") secret: String, @Value("\${panenku.jwt.issuer}") issuer: String, clock: Clock): JwtDecoder {
         require(secret.toByteArray(Charsets.UTF_8).size >= 32) { "JWT_SECRET minimal 32 byte UTF-8" }
         val decoder = NimbusJwtDecoder.withSecretKey(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
             .macAlgorithm(MacAlgorithm.HS256).build()
         decoder.setJwtValidator(DelegatingOAuth2TokenValidator(
-            JwtValidators.createDefaultWithIssuer(issuer), JwtClaimValidator<Instant>("exp") { it != null }
+            JwtTimestampValidator().also { it.setClock(clock) }, JwtIssuerValidator(issuer),
+            JwtClaimValidator<Instant>("exp") { it != null }
         ))
         return decoder
     }
@@ -37,7 +39,8 @@ class SecurityConfig {
         .csrf { it.disable() }
         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
         .authorizeHttpRequests {
-            it.requestMatchers(HttpMethod.GET, "/api/v1/buyer/products", "/api/v1/buyer/products/*", "/api/v1/buyer/commodities").permitAll()
+            it.requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/v1/buyer/products", "/api/v1/buyer/products/*", "/api/v1/buyer/commodities").permitAll()
                 .anyRequest().authenticated()
         }
         .oauth2ResourceServer { it.jwt { } }

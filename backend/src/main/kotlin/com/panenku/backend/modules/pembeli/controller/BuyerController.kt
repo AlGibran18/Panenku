@@ -1,6 +1,6 @@
 package com.panenku.backend.modules.pembeli.controller
 
-import com.panenku.backend.common.exception.ApiResponse
+import com.panenku.backend.common.dto.ApiResponse
 import com.panenku.backend.common.security.ActorService
 import com.panenku.backend.modules.pembeli.dto.*
 import com.panenku.backend.modules.pembeli.service.*

@@ -14,7 +14,7 @@ Kode ini mulai mengimplementasikan pembagian backend terbaru: F1 katalog/produk,
 - Snapshot order/item tersimpan dan dilindungi trigger database dari perubahan. Riwayat awal `menunggu_petani` dibuat saat checkout.
 - Pessimistic row locks, transaksi tunggal, unique idempotency key per pembeli. Retry payload yang sama mengembalikan order yang sama. Payload berbeda dengan key lama menghasilkan HTTP 409.
 
-Belum diimplementasikan di tahap ini: register/login/refresh token, pengelolaan profil/KTP/metode pembayaran, unggah file, rating/ulasan, status setelah checkout, pembayaran, refund, notifikasi, scheduler pelepasan stok, audit log admin. Ini perlu disambungkan dengan pekerjaan Rampan. Detail katalog belum menampilkan rating dari modul ulasan. `photoUrl` saat ini adalah path foto yang diberikan modul storage; upload dan signed URL belum disediakan.
+Auth Geisar sudah diintegrasikan: register pembeli/petani, profil awal, password BCrypt, dan login JWT yang dapat dipakai pada keranjang/produk/checkout. Belum diimplementasikan di tahap ini: refresh token/logout, pengelolaan profil/KTP/metode pembayaran lanjutan, unggah file, rating/ulasan, status setelah checkout, pembayaran, refund, notifikasi, scheduler pelepasan stok, audit log admin. Ini perlu disambungkan dengan pekerjaan Rampan. Detail katalog belum menampilkan rating dari modul ulasan. `photoUrl` saat ini adalah path foto yang diberikan modul storage; upload dan signed URL belum disediakan.
 
 ## Menjalankan
 
@@ -37,7 +37,7 @@ set +a
 ./gradlew bootRun
 ```
 
-Alternatif: tambahkan variabel tersebut ke Run Configuration IntelliJ. Di Windows gunakan `gradlew.bat bootRun` dan environment variables dari IDE/PowerShell. Tidak ada akun/password/token demo bawaan dan tidak ada endpoint login sementara. Endpoint publik dapat dibuka setelah database dan server berjalan; operasi terautentikasi memerlukan akun database dan JWT dari modul auth Rampan.
+Alternatif: tambahkan variabel tersebut ke Run Configuration IntelliJ. Di Windows gunakan `gradlew.bat bootRun` dan environment variables dari IDE/PowerShell. Tidak ada akun/password/token demo bawaan. Daftarkan pembeli/petani melalui POST /api/v1/auth/register, kemudian login melalui POST /api/v1/auth/login. Respons data login berisi string access token. Petani baru memiliki KTP belum_diajukan, sehingga hanya boleh menyiapkan draft sampai disetujui admin.
 
 Contoh publik:
 
@@ -54,6 +54,7 @@ Base URL `/api/v1`.
 
 | Method | Path | Akses |
 |---|---|---|
+| POST | `/auth/register`, `/auth/login` | Publik |
 | GET | `/buyer/products`, `/buyer/products/{id}`, `/buyer/commodities` | Publik |
 | GET, POST | `/admin/commodities` | Admin |
 | PUT | `/admin/commodities/{id}` | Admin |
@@ -120,8 +121,8 @@ Simpan key pada upaya checkout di Android. Retry akibat timeout memakai **key da
 
 ## Titik integrasi Rampan
 
-1. **JWT:** HS256, issuer default `panenku` (dapat diubah melalui `JWT_ISSUER`), subject UUID akun, secret UTF-8 sama dengan `JWT_SECRET`, `exp` perlu diterbitkan oleh modul auth. Decoder memvalidasi signature, issuer, serta waktu token. Role token tidak dipercaya untuk otorisasi; `users.role/status` diperiksa database pada setiap operasi privat. Modul ini memverifikasi token, belum menerbitkannya.
-2. **Akun/profil/metode bayar/settings:** mapping awal `Account`, `FarmerProfile`, `FarmerPaymentMethod`, `Setting` hanya kebutuhan baca/locking fitur Gibran. Kembangkan mapping tersebut saat menambahkan auth/profil; jangan memetakan entity kedua ke tabel yang sama tanpa menyelaraskan. V1 menyediakan fondasi tabel bersama, belum seluruh skema backend di README.
+1. **JWT:** HS256, issuer default `panenku` (dapat diubah melalui `JWT_ISSUER`), subject UUID akun, secret UTF-8 sama dengan `JWT_SECRET`, `exp` diterbitkan oleh JwtProvider Geisar. Decoder memvalidasi signature, issuer, serta waktu token menggunakan Clock bersama. Role token tidak dipercaya untuk otorisasi; `users.role/status` diperiksa database pada setiap operasi privat. Login menerbitkan token melalui JwtProvider. Token lama dengan subject email harus diganti dengan login ulang; subject baru berupa UUID.
+2. **Akun/profil/metode bayar/settings:** Auth dan fitur Gibran memakai satu entity `User` dan satu `UserRepository`. Mapping `FarmerProfile`, `FarmerPaymentMethod`, `Setting` dipakai bersama; jangan menambahkan entity pengguna kedua untuk tabel users. Registrasi membuat profil petani/pembeli dalam transaksi yang sama. V1 menyediakan fondasi tabel bersama dan V2 menambahkan buyer_profiles; belum seluruh skema backend di README.
 3. **Area dan slot:** `service_area` menyimpan identifier kecamatan dipisah `|`, misalnya `kepanjen|dau`; `time_slots` menyimpan `08:00-10:00|13:00-15:00`. Ini pilihan implementasi awal untuk parameter usulan PRD. Endpoint profil Rampan perlu menyimpan format yang sama, atau migrasikan kedua modul ke tabel/JSON terstruktur. Kecamatan dibandingkan persis. Slot wajib untuk pickup maupun delivery. Slot yang sudah dimulai pada hari ini ditolak; slot lintas tengah malam belum didukung.
 4. **Order/reservasi:** order awal `menunggu_petani`, pembayaran `belum_dibayar`, expires 24 jam dari server UTC. Usulan waktu 24 jam dan presisi 0.01 mengikuti parameter awal PRD; belum ada scheduler expiry pada tahap ini. Status/history setelah checkout milik Rampan. Jangan ubah field snapshot; gunakan status/received_at/expires_at untuk kelanjutan alur.
 5. **Locking:** operasi stok/profil petani harus mengunci `users` petani → `farmer_profiles` → commodities urut UUID → products urut UUID. Checkout mengunci pembeli sebelum urutan tersebut untuk serialisasi retry. Scheduler/status harus mengikuti urutan stok yang kompatibel dan tidak menahan order dulu lalu menunggu farmer apabila ada jalur sebaliknya. Hindari baca entity produk sebelum lock karena cache persistence context bisa mempertahankan stok lama. Checkout memakai scalar discovery untuk menghindari ini.
@@ -140,5 +141,7 @@ cd backend
 Test integrasi **membutuhkan Docker aktif**, memakai Testcontainers PostgreSQL 16, dan tidak menyentuh database development. Tidak ada fallback H2/skip otomatis. Test tidak membutuhkan `.env` karena memakai database/secret/clock khusus test.
 
 Skenario: perhitungan pecahan dan pembulatan per item; batas total termasuk ongkir; tanggal WIB dan tanggal siap paling akhir; area/slot; publikasi belum terverifikasi; hak akses dan kepemilikan; keranjang tidak mereservasi; suspend dari cart lama; harga/ongkir berubah; snapshot tetap; dua pembeli merebut 1 kg; retry bersamaan; kegagalan database setelah insert order harus me-rollback order/item/reservasi/riwayat.
+
+Tes integrasi juga memeriksa daftar pembeli/petani, profil awal, BCrypt, role admin yang dilarang didaftar, login gagal, token UUID/issuer, serta token login asli yang mengakses keranjang dan produk.
 
 UAT lintas aplikasi untuk pembayaran, pemenuhan, refund, notifikasi, dan scheduler tetap perlu dilaksanakan setelah integrasi Rampan. Lulusnya test modul ini belum berarti seluruh MVP selesai.

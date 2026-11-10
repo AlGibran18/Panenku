@@ -14,7 +14,7 @@ import java.util.UUID
 @Transactional(readOnly = true)
 class CatalogService(
     private val products: ProductRepository, private val commodities: CommodityRepository,
-    private val farmers: FarmerProfileRepository, private val accounts: AccountRepository
+    private val farmers: FarmerProfileRepository, private val accounts: UserRepository
 ) {
     fun list(search: String, commodityId: UUID?, sort: String, page: Int, size: Int): PageDTO<ProductDTO> {
         if (page < 0 || size !in 1..100 || search.length > 100) invalid("Paginasi atau pencarian tidak valid.")

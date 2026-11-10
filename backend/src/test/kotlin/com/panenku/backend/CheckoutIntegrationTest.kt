@@ -220,7 +220,7 @@ class CheckoutIntegrationTest {
     }
 
     @Test fun `JWT signature issuer and expiration are validated by the real decoder`() {
-        fun token(secret: String = "test-only-32-byte-secret-for-tests-123456789", issuer: String = "panenku", expiry: Instant? = Instant.now().plusSeconds(3600)): String {
+        fun token(secret: String = "test-only-32-byte-secret-for-tests-123456789", issuer: String = "panenku", expiry: Instant? = Instant.parse("2026-11-10T00:00:00Z").plusSeconds(3600)): String {
             val claims = JWTClaimsSet.Builder().subject(buyer.toString()).issuer(issuer)
             if (expiry != null) claims.expirationTime(Date.from(expiry))
             val signed = SignedJWT(JWSHeader(JWSAlgorithm.HS256), claims.build())
@@ -228,10 +228,78 @@ class CheckoutIntegrationTest {
             return signed.serialize()
         }
         mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer " + token())).andExpect(status().isOk)
-        listOf(token(issuer = "wrong"), token(expiry = Instant.now().minusSeconds(3600)), token(expiry = null),
+        listOf(token(issuer = "wrong"), token(expiry = Instant.parse("2026-11-10T00:00:00Z").minusSeconds(3600)), token(expiry = null),
             token(secret = "another-test-only-32-byte-secret-123456789")).forEach {
             mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer $it")).andExpect(status().isUnauthorized)
         }
+    }
+
+    private fun register(body: String) = mvc.perform(post("/api/v1/auth/register").contentType(MediaType.APPLICATION_JSON).content(body))
+    private fun loginToken(email: String, password: String = "password123"): String {
+        val body = mapper.writeValueAsString(mapOf("email" to email, "password" to password))
+        val response = mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON).content(body))
+            .andExpect(status().isOk).andReturn()
+        return mapper.readTree(response.response.contentAsString)["data"].asText()
+    }
+    @Test fun `Geisar registration login and authenticated buyer cart work together`() {
+        val response = register("""{"email":"Buyer.New@example.test","password":"password123","role":"pembeli","fullName":"Pembeli Baru","contactPhone":"081234"}""")
+            .andExpect(status().isCreated).andReturn()
+        val id = UUID.fromString(mapper.readTree(response.response.contentAsString)["data"]["id"].asText())
+        assertEquals("Pembeli Baru", db.queryForObject("SELECT full_name FROM buyer_profiles WHERE id=?", String::class.java, id))
+        val hash = db.queryForObject("SELECT password_hash FROM users WHERE id=?", String::class.java, id)
+        assertNotEquals("password123", hash)
+        assertTrue(org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches("password123", hash))
+        val token = loginToken("BUYER.NEW@example.test")
+        val claims = SignedJWT.parse(token).jwtClaimsSet
+        assertEquals(id.toString(), claims.subject); assertEquals("panenku", claims.issuer)
+        mvc.perform(get("/api/v1/buyer/cart").header("Authorization", "Bearer $token")).andExpect(status().isOk)
+        mvc.perform(get("/api/v1/petani/products").header("Authorization", "Bearer $token")).andExpect(status().isForbidden)
+    }
+    @Test fun `farmer registration creates unverified profile and can create draft`() {
+        val response = register("""{"email":"new.farmer@example.test","password":"password123","role":"petani","storeName":"Toko Baru","contactPhone":"081234"}""")
+            .andExpect(status().isCreated).andReturn()
+        val id = UUID.fromString(mapper.readTree(response.response.contentAsString)["data"]["id"].asText())
+        assertEquals("belum_diajukan", db.queryForObject("SELECT ktp_status FROM farmer_profiles WHERE id=?", String::class.java, id))
+        assertEquals("081234", db.queryForObject("SELECT contact_phone FROM farmer_profiles WHERE id=?", String::class.java, id))
+        val token = loginToken("new.farmer@example.test")
+        val request = ProductRequest(commodity, "Draft Auth", 12000, BigDecimal.ONE, date)
+        mvc.perform(post("/api/v1/petani/products").header("Authorization", "Bearer $token")
+            .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request)))
+            .andExpect(status().isCreated).andExpect(jsonPath("$.data.publicationStatus").value("draft"))
+        mvc.perform(post("/api/v1/petani/products").header("Authorization", "Bearer $token")
+            .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request.copy(publicationStatus = "aktif"))))
+            .andExpect(status().isForbidden)
+    }
+    @Test fun `auth validates requests and public admin signup stays forbidden`() {
+        register("""{"email":"admin@example.test","password":"password123","role":"admin"}""").andExpect(status().isForbidden)
+        listOf(
+            """{"email":"bad","password":"password123","role":"pembeli","fullName":"Nama"}""",
+            """{"email":"new@example.test","password":"short","role":"pembeli","fullName":"Nama"}""",
+            """{"email":"new@example.test","password":"password123","role":"unknown"}""",
+            """{"email":"new@example.test","password":"password123","role":"petani"}""",
+            """{"email":"new@example.test","password":"password123","role":"pembeli"}"""
+        ).forEach { register(it).andExpect(status().isBadRequest) }
+        assertEquals(4L, count("users"))
+        register("""{"email":"ok@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""").andExpect(status().isCreated)
+        register("""{"email":"OK@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""").andExpect(status().isConflict)
+    }
+    @Test fun `wrong credentials fail without exposing account details`() {
+        register("""{"email":"auth@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""").andExpect(status().isCreated)
+        listOf("auth@example.test", "missing@example.test").forEach {
+            mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(mapOf("email" to it, "password" to "wrong-password"))))
+                .andExpect(status().isUnauthorized).andExpect(jsonPath("$.message").value("Email atau password salah"))
+        }
+    }
+    @Test fun `failed profile save rolls registration back atomically`() {
+        db.execute("CREATE FUNCTION test_fail_profile() RETURNS TRIGGER LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''simulated profile failure''; END;'")
+        db.execute("CREATE TRIGGER test_profile_failure BEFORE INSERT ON buyer_profiles FOR EACH ROW EXECUTE FUNCTION test_fail_profile()")
+        try {
+            assertThrows(Exception::class.java) {
+                register("""{"email":"rollback@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""")
+            }
+            assertEquals(4L, count("users")); assertEquals(0L, count("buyer_profiles"))
+        } finally { db.execute("DROP TRIGGER test_profile_failure ON buyer_profiles"); db.execute("DROP FUNCTION test_fail_profile()") }
     }
     @Test fun `HTTP public catalog and protected buyer operations respect database roles`() {
         mvc.perform(get("/api/v1/buyer/products")).andExpect(status().isOk)
