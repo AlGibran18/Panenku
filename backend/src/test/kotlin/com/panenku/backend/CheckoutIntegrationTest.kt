@@ -449,7 +449,7 @@ class CheckoutIntegrationTest {
     }
     @Test fun `UAT02 unverified farmer can save draft but cannot publish`() {
         db.update("UPDATE farmer_profiles SET ktp_status='menunggu' WHERE id=?", farmer)
-        val req = ProductRequest(commodity, "Draft", 10000, BigDecimal.ONE, date, photoUrl = "products/dummy.jpg")
+        val req = ProductRequest(commodity, "Draft", 10000, BigDecimal.ONE, date)
         assertEquals("draft", productService.save(farmer, null, req).publicationStatus)
         assertThrows(ApiException::class.java) { productService.save(farmer, null, req.copy(publicationStatus = "aktif")) }
         assertThrows(ApiException::class.java) { checkout.checkout(buyer, "unverified", request()) }

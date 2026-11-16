@@ -1,5 +1,7 @@
 package com.panenku.backend.common.exception
 
+import org.springframework.web.multipart.support.MissingServletRequestPartException
+import org.springframework.web.multipart.MaxUploadSizeExceededException
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.MissingRequestHeaderException
 import org.springframework.web.bind.MissingServletRequestParameterException
@@ -28,7 +30,7 @@ class ExceptionHandler {
     fun databaseConflict(ex: Exception) = ResponseEntity.status(HttpStatus.CONFLICT).body(
         ErrorResponse(code = "CONFLICT", message = "Data berubah atau operasi berbenturan. Muat ulang atau ulangi request dengan key yang sama.")
     )
-    @ExceptionHandler(MethodArgumentNotValidException::class, HttpMessageNotReadableException::class, MethodArgumentTypeMismatchException::class, MissingRequestHeaderException::class, MissingServletRequestParameterException::class)
+    @ExceptionHandler(MethodArgumentNotValidException::class, HttpMessageNotReadableException::class, MethodArgumentTypeMismatchException::class, MissingRequestHeaderException::class, MissingServletRequestParameterException::class, MissingServletRequestPartException::class)
     fun badInput(ex: Exception) = ResponseEntity.badRequest().body(ErrorResponse(code = "INVALID_REQUEST", message = "Periksa format dan field request."))
 
     @ExceptionHandler(HttpRequestMethodNotSupportedException::class)
@@ -44,6 +46,9 @@ class ExceptionHandler {
     @ExceptionHandler(AccessDeniedException::class)
     fun forbidden(ex: AccessDeniedException) = ResponseEntity.status(HttpStatus.FORBIDDEN)
         .body(ErrorResponse(code = "FORBIDDEN", message = "Akses tidak diizinkan."))
+    @ExceptionHandler(MaxUploadSizeExceededException::class)
+    fun uploadTooLarge(ex: MaxUploadSizeExceededException) = ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+        .body(ErrorResponse(code = "PHOTO_TOO_LARGE", message = "Foto produk maksimal 5 MiB."))
     @ExceptionHandler(Exception::class)
     fun unexpected(ex: Exception): ResponseEntity<ErrorResponse> {
         logger.error("Kesalahan server saat memproses request.", ex)
