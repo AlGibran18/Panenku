@@ -22,11 +22,12 @@ import java.util.UUID
 class CheckoutService(
     private val actors: ActorService, private val accounts: UserRepository,
     private val products: ProductRepository, private val commodities: CommodityRepository,
-    private val farmers: FarmerProfileRepository, private val payments: PaymentMethodRepository,
+    private val farmers: FarmerProfileRepository,
     private val settings: SettingRepository, private val orders: OrderRepository,
     private val orderItems: OrderItemRepository, private val reservations: StockReservationRepository,
     private val history: OrderStatusHistoryRepository, private val scheduling: SchedulingService,
-    private val mapper: ObjectMapper, private val clock: Clock
+    private val mapper: ObjectMapper, private val clock: Clock,
+    private val paymentDestinations: PaymentDestinationService
 ) {
     @Transactional
     fun checkout(actor: UUID, key: String, request: CheckoutRequest): OrderDTO {
@@ -42,13 +43,17 @@ class CheckoutService(
             if (it.requestHash != hash) conflict("Idempotency-Key sudah digunakan untuk request berbeda.")
             return dto(it)
         }
+        if (request.paymentMethodId != null || request.paymentMethodVersion != null) {
+            invalid("Metode pembayaran dipilih setelah petani menerima pesanan.")
+        }
         val discovered = normalized.items.map { products.reference(it.productId) ?: missing("Produk tidak ditemukan.") }
         val farmerId = discovered.first().farmerId
         if (discovered.any { it.farmerId != farmerId }) invalid("Satu checkout hanya untuk satu petani.")
         val farmerAccount = accounts.lockById(farmerId) ?: conflict("Petani tidak tersedia.")
         val farmer = farmers.lockById(farmerId) ?: conflict("Profil petani tidak tersedia.")
         if (farmerAccount.role != "petani" || farmerAccount.status != "active" || farmer.ktpStatus != "disetujui") conflict("Petani belum terverifikasi atau disuspend.")
-        if (farmer.pickupLocation.isNullOrBlank() || payments.findAllByFarmerId(farmerId).none { it.complete() }) conflict("Profil atau metode pembayaran belum lengkap.")
+        if (farmer.pickupLocation.isNullOrBlank()) conflict("Profil petani belum lengkap.")
+        val paymentOptions = paymentDestinations.lockOptions(farmerId)
         val commodityMap = discovered.map { it.commodityId }.distinct().sorted().associateWith { commodities.lockById(it) ?: conflict("Komoditas tidak tersedia.") }
         val locked = normalized.items.map { item ->
             // Scalar discovery avoids cached entities before acquiring row locks.
@@ -83,6 +88,7 @@ class CheckoutService(
             deliveryDistrictSnapshot = if (request.fulfillmentMethod == "delivery") request.deliveryDistrict else null,
             buyerNotes = request.buyerNotes, reservedAt = now, expiresAt = now.plus(Duration.ofHours(24)), createdAt = now, updatedAt = now,
             idempotencyKey = key, requestHash = hash))
+        paymentDestinations.saveOptions(order.id, paymentOptions)
         locked.forEachIndexed { index, p ->
             val quantity = normalized.items[index].quantityKg
             orderItems.save(OrderItem(orderId = order.id, productId = p.id, productNameSnapshot = p.name,

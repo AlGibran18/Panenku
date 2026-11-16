@@ -1,5 +1,6 @@
 package com.panenku.backend.modules.pembeli.dto
 
+import com.fasterxml.jackson.annotation.JsonInclude
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
@@ -18,7 +19,10 @@ data class CheckoutItemRequest(val productId: UUID, val quantityKg: BigDecimal, 
 data class CheckoutRequest(
     val items: List<CheckoutItemRequest>, val fulfillmentMethod: String, val scheduledDate: LocalDate,
     val scheduledTimeSlot: String, val expectedDeliveryFee: Long,
-    val deliveryAddress: String? = null, val deliveryDistrict: String? = null, val buyerNotes: String? = null
+    val deliveryAddress: String? = null, val deliveryDistrict: String? = null, val buyerNotes: String? = null,
+    // Omit null fields from historical request hashes so old idempotency keys remain replayable.
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodId: UUID? = null,
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodVersion: String? = null
 )
 data class OrderItemDTO(val productId: UUID, val productNameSnapshot: String, val commoditySnapshot: String,
     val readyDateSnapshot: LocalDate, val quantityKg: BigDecimal, val pricePerKgSnapshot: Long, val itemSubtotal: Long)

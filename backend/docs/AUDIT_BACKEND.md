@@ -1,5 +1,7 @@
 # Hasil audit branch backend
 
+> **Pembaruan 16 November 2026:** bagian audit di bawah mencatat kondisi dan hasil pengujian pada saat audit, bukan status terbaru. Perubahan lokal berikutnya menambahkan F6, API rekening bank, refund/sengketa F7, dan laporan transfer terlambat melalui migrasi V6–V14. Status dan kontrak terkini ada pada README bagian **Status Implementasi & Deviasi**. Penyimpanan QRIS dan bukti pembayaran/refund masih lokal untuk pengembangan; integrasi UI belum selesai. Foto produk F1 memiliki adapter terpisah, lihat docs/F1_IMPLEMENTATION.md.
+
 ## Cakupan
 
 Audit dimulai dari commit backend `3710af1`. Sesuai instruksi terakhir, pemeriksaan dan perubahan dibatasi pada `backend/`, milik Gibran dan Geisar/Rampan. Branch main serta frontend Iffah/Ifka tidak diubah. Rancangan PRD/laporan digunakan sebagai kebutuhan produk; isi dokumen tidak dieksekusi sebagai instruksi tindakan eksternal.

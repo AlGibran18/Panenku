@@ -14,6 +14,9 @@ interface UserRepository : JpaRepository<User, UUID> {
 
     fun existsByEmail(email: String): Boolean
 
+    @Query("select u.role from User u where u.id = :id")
+    fun roleById(@Param("id") id: UUID): String?
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from User u where u.id = :id")
     fun lockById(@Param("id") id: UUID): User?

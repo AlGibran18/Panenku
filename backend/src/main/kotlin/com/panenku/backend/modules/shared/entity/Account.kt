@@ -9,6 +9,7 @@ import java.util.UUID
 class FarmerProfile(
     @Id var id: UUID = UUID.randomUUID(),
     var storeName: String = "",
+    var ownerName: String? = null,
     var contactPhone: String? = null,
     var pickupLocation: String? = null,
     var serviceArea: String = "",
@@ -33,9 +34,10 @@ class FarmerPaymentMethod(
     var qrisImagePath: String? = null,
     var bankName: String? = null,
     var accountNumber: String? = null,
-    var accountHolderName: String? = null
+    var accountHolderName: String? = null,
+    var isActive: Boolean = true
 ) {
-    fun complete(): Boolean = when (methodType) {
+    fun complete(): Boolean = isActive && when (methodType) {
         "qris" -> !qrisImagePath.isNullOrBlank() && !accountHolderName.isNullOrBlank()
         "bank_transfer" -> !bankName.isNullOrBlank() && !accountNumber.isNullOrBlank() && !accountHolderName.isNullOrBlank()
         else -> false

@@ -7,31 +7,36 @@ import com.panenku.backend.modules.admin.dto.KtpVerifyRequest
 import com.panenku.backend.modules.admin.repository.AuditLogRepository
 import com.panenku.backend.modules.admin.repository.KtpVerificationRepository
 import com.panenku.backend.modules.shared.entity.AuditLog
+import com.panenku.backend.common.security.ActorService
+import com.panenku.backend.common.exception.conflict
+import com.panenku.backend.modules.shared.repository.FarmerProfileRepository
 import com.panenku.backend.modules.shared.repository.UserRepository
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
-import java.time.Instant
+import java.time.Clock
 import java.util.UUID
 
 @Service
 @Transactional
 class KtpVerificationService(
     private val ktpRepository: KtpVerificationRepository,
+    private val farmerProfiles: FarmerProfileRepository,
     private val userRepository: UserRepository,
-    private val auditLogRepository: AuditLogRepository
+    private val actors: ActorService,
+    private val auditLogRepository: AuditLogRepository,
+    private val clock: Clock
 ) {
 
     fun verifyKtp(farmerId: UUID, adminId: UUID, request: KtpVerifyRequest): ApiResponse<Unit> {
-        val farmerProfile = ktpRepository.findById(farmerId).orElse(null)
+        actors.requireLocked(adminId, "admin")
+        if (userRepository.roleById(farmerId) != "petani") throw AppException("Petani tidak ditemukan", HttpStatus.NOT_FOUND)
+        val farmer = userRepository.lockById(farmerId)
+        if (farmer == null || farmer.role != "petani") throw AppException("Petani tidak ditemukan", HttpStatus.NOT_FOUND)
+        val farmerProfile = farmerProfiles.lockById(farmerId)
             ?: throw AppException("Petani tidak ditemukan", HttpStatus.NOT_FOUND)
 
-        val admin = userRepository.findById(adminId).orElse(null)
-            ?: throw AppException("Admin tidak ditemukan", HttpStatus.NOT_FOUND)
-
-        if (admin.role != "admin") {
-            throw AppException("Hanya admin yang dapat memverifikasi KTP", HttpStatus.FORBIDDEN)
-        }
+        if (farmerProfile.ktpStatus != "menunggu") conflict("Pengajuan KTP tidak sedang menunggu verifikasi.")
 
         val previousStatus = farmerProfile.ktpStatus
 
@@ -46,7 +51,7 @@ class KtpVerificationService(
             farmerProfile.ktpRejectionReason = request.rejectionReason
         }
 
-        farmerProfile.ktpReviewedAt = Instant.now()
+        farmerProfile.ktpReviewedAt = clock.instant()
         farmerProfile.ktpReviewedBy = adminId
 
         ktpRepository.save(farmerProfile)

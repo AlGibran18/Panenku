@@ -1,7 +1,5 @@
 package com.panenku.backend.common.exception
 
-import org.springframework.web.multipart.support.MissingServletRequestPartException
-import org.springframework.web.multipart.MaxUploadSizeExceededException
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.MissingRequestHeaderException
 import org.springframework.web.bind.MissingServletRequestParameterException
@@ -18,6 +16,9 @@ import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
+import org.springframework.web.multipart.MaxUploadSizeExceededException
+import jakarta.servlet.http.HttpServletRequest
+import org.springframework.web.multipart.support.MissingServletRequestPartException
 
 @RestControllerAdvice
 class ExceptionHandler {
@@ -33,6 +34,15 @@ class ExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException::class, HttpMessageNotReadableException::class, MethodArgumentTypeMismatchException::class, MissingRequestHeaderException::class, MissingServletRequestParameterException::class, MissingServletRequestPartException::class)
     fun badInput(ex: Exception) = ResponseEntity.badRequest().body(ErrorResponse(code = "INVALID_REQUEST", message = "Periksa format dan field request."))
 
+    @ExceptionHandler(MaxUploadSizeExceededException::class)
+    fun uploadTooLarge(ex: MaxUploadSizeExceededException, request: HttpServletRequest): ResponseEntity<ErrorResponse> {
+        val productPhoto = Regex("/api/v1/petani/products/[^/]+/photo/?$").containsMatchIn(request.requestURI)
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(
+            if (productPhoto) ErrorResponse(code = "PHOTO_TOO_LARGE", message = "Foto produk maksimal 5 MiB.")
+            else ErrorResponse(code = "FILE_TOO_LARGE", message = "Ukuran file maksimal 5 MB.")
+        )
+    }
+
     @ExceptionHandler(HttpRequestMethodNotSupportedException::class)
     fun method(ex: HttpRequestMethodNotSupportedException) = ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
         .allow(*ex.supportedHttpMethods.orEmpty().toTypedArray())
@@ -46,9 +56,6 @@ class ExceptionHandler {
     @ExceptionHandler(AccessDeniedException::class)
     fun forbidden(ex: AccessDeniedException) = ResponseEntity.status(HttpStatus.FORBIDDEN)
         .body(ErrorResponse(code = "FORBIDDEN", message = "Akses tidak diizinkan."))
-    @ExceptionHandler(MaxUploadSizeExceededException::class)
-    fun uploadTooLarge(ex: MaxUploadSizeExceededException) = ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-        .body(ErrorResponse(code = "PHOTO_TOO_LARGE", message = "Foto produk maksimal 5 MiB."))
     @ExceptionHandler(Exception::class)
     fun unexpected(ex: Exception): ResponseEntity<ErrorResponse> {
         logger.error("Kesalahan server saat memproses request.", ex)
