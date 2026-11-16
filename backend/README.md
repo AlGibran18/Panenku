@@ -1397,10 +1397,24 @@ Belum ada migrasi: `payment_submissions`, `reviews`, `refunds`, `notifications` 
 
 | Nama | NIM | Fungsi Utama |
 |------|-----|--------------|
-| Mochammad Fani Al Gibran | 245150207111008 | F2 Reservasi Stok & F4 Perhitungan Checkout |
-| Mohammad Geisar Rampan | 245150207111038 | F5 Status Pesanan & F6 Verifikasi Pembayaran |
-| Ifka Rosmalita Nur Nazjila | 245150207111022 | F7 Refund |
-| Hanifa Nur Mawaddah | 245150200111027 | F1 Katalog Produk & F3 Jadwal Pengantaran |
+| Mochammad Fani Al Gibran | 245150207111008 | F1 Katalog & Produk, F2 Reservasi Stok & F4 Perhitungan Checkout |
+| Mohammad Geisar Rampan | 245150207111038 | F3 Jadwal Pengantara, F5 Status Pesanan & F6 Verifikasi Pembayaran & F7 Refund |
+
+
+## Jobdesk Fitur Backend
+
+| Fitur | Owner |
+|---|---|
+| **F1 Katalog & Produk** | Gibran |
+| **F2 Keranjang & Reservasi Stok** | Gibran |
+| **F3 Jadwal Pengantara** | Gibran |
+| **F4 Perhitungan Checkout** | Gibran |
+| **F5 Status Pesanan** | Rampan |
+| **F6 Verifikasi Pembayaran** | Rampan (belum fully implement) |
+| **F7 Refund** | Rampan (telah dialihkan dari Ifka) |
+| **Auth & User** | Rampan + Gibran (sama-sama) |
+| **Admin** | Rampan (sama-sama) |
+| **Scheduler/Infra** | Rampan |
 
 ---
 
