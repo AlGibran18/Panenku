@@ -8,8 +8,12 @@ import java.util.UUID
 data class CartItemRequest(val productId: UUID, val quantityKg: BigDecimal)
 data class CartQuantityRequest(val quantityKg: BigDecimal)
 data class CartItemDTO(val id: UUID, val productId: UUID, val name: String, val quantityKg: BigDecimal,
-    val pricePerKg: Long, val itemSubtotal: Long, val stockAvailable: BigDecimal, val available: Boolean)
-data class CartDTO(val items: List<CartItemDTO>, val subtotalItems: BigDecimal)
+    val pricePerKg: Long, val itemSubtotal: Long, val stockAvailable: BigDecimal, val available: Boolean,
+    val farmerId: UUID? = null, val storeName: String? = null, val readyDate: LocalDate? = null,
+    val photoAccessUrl: String? = null, val photoExpiresAt: Instant? = null, val unavailableReason: String? = null)
+data class CartDTO(val items: List<CartItemDTO>, val subtotalItems: BigDecimal,
+    val cartVersion: String = "", val farmerId: UUID? = null, val storeName: String? = null,
+    val hasUnavailableItems: Boolean = false)
 data class CheckoutItemRequest(val productId: UUID, val quantityKg: BigDecimal, val expectedPricePerKg: Long)
 data class CheckoutRequest(
     val items: List<CheckoutItemRequest>, val fulfillmentMethod: String, val scheduledDate: LocalDate,

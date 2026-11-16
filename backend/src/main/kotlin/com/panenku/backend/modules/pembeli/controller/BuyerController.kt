@@ -14,6 +14,7 @@ import java.util.UUID
 @RequestMapping("/api/v1/buyer/cart")
 class CartController(private val service: CartService, private val actors: ActorService) {
     @GetMapping fun get(@AuthenticationPrincipal jwt: Jwt) = ApiResponse(data = service.get(actors.id(jwt)))
+    @PutMapping fun replace(@AuthenticationPrincipal jwt: Jwt, @RequestBody request: CartReplaceRequest) = ApiResponse(data = service.replace(actors.id(jwt), request))
     @PostMapping("/items") fun add(@AuthenticationPrincipal jwt: Jwt, @RequestBody request: CartItemRequest) = ApiResponse(data = service.add(actors.id(jwt), request))
     @PutMapping("/items/{id}") fun update(@AuthenticationPrincipal jwt: Jwt, @PathVariable id: UUID, @RequestBody request: CartQuantityRequest) = ApiResponse(data = service.update(actors.id(jwt), id, request.quantityKg))
     @DeleteMapping("/items/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
