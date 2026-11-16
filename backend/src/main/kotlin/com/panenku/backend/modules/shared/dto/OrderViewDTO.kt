@@ -38,7 +38,9 @@ data class OrderViewDTO(
     val updatedAt: Instant,
     val receivedAt: Instant?,
     val items: List<OrderItemDTO>,
-    val history: List<OrderStatusHistoryDTO> = emptyList()
+    val history: List<OrderStatusHistoryDTO> = emptyList(),
+    val effectiveSchedule: EffectiveScheduleDTO = EffectiveScheduleDTO(scheduledDate, scheduledTimeSlot, 0),
+    val pendingScheduleChange: ScheduleChangeDTO? = null
 )
 
 /** Body untuk `PUT /petani/orders/{id}/respond`. */

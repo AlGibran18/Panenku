@@ -50,7 +50,7 @@ class PaymentSubmissionService(
     private val users: UserRepository, private val farmers: FarmerProfileRepository,
     private val products: ProductRepository, private val reservations: StockReservationRepository,
     private val destinations: PaymentDestinationService,
-    private val mapper: ObjectMapper, private val clock: Clock,
+    private val mapper: ObjectMapper, private val clock: Clock, private val scheduleGuard: OrderScheduleGuard,
     @Value("\${panenku.storage.local-dir:}") private val directory: String
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -83,6 +83,7 @@ class PaymentSubmissionService(
             return previous.view
         }
         val now = now()
+        scheduleGuard.canPay(order)
         val transition = PaymentStatusRules.submit(order.orderStatus, order.paymentStatus, order.expiresAt, now)
         destinations.finalizeSelection(orderId)
         val storage = storage()

@@ -79,6 +79,7 @@ class CheckoutIntegrationTest {
     @Autowired lateinit var lifecycle: OrderLifecycleService
     @Autowired lateinit var productService: ProductService
     @Autowired lateinit var catalog: CatalogService
+    @Autowired lateinit var scheduleGuard: com.panenku.backend.modules.shared.service.OrderScheduleGuard
     @Autowired lateinit var paymentDestinations: com.panenku.backend.modules.shared.service.PaymentDestinationService
     @Autowired lateinit var farmerPaymentMethods: com.panenku.backend.modules.petani.service.FarmerPaymentMethodService
     @Autowired lateinit var paymentSubmissions: com.panenku.backend.modules.shared.service.PaymentSubmissionService
@@ -781,7 +782,13 @@ class CheckoutIntegrationTest {
     }
 
     private fun awaitingPayment(): UUID {
-        val order = checkout.checkout(buyer, "payment-${UUID.randomUUID()}", request())
+        // Use a future slot even when an earlier fixture in this test advanced time to receipt.
+        val at = ZonedDateTime.now(clock.withZone(ZoneId.of("Asia/Jakarta")))
+        var day = maxOf(date, at.toLocalDate())
+        val slots = listOf("08:00-10:00", "13:00-15:00")
+        var slot = slots.firstOrNull { day > at.toLocalDate() || LocalTime.parse(it.substring(0,5)) > at.toLocalTime() }
+        if (slot == null) { day = day.plusDays(1); slot = slots.first() }
+        val order = checkout.checkout(buyer, "payment-${UUID.randomUUID()}", request().copy(scheduledDate=day,scheduledTimeSlot=slot))
         lifecycle.respondByFarmer(farmer, order.orderId, OrderRespondRequest("terima"))
         paymentDestinations.chooseForBuyer(buyer, order.orderId, paymentOption.id)
         return order.orderId
@@ -794,8 +801,15 @@ class CheckoutIntegrationTest {
         return order
     }
 
+    fun atSchedule(orderId: UUID) {
+        val day = db.queryForObject("SELECT scheduled_date FROM orders WHERE id=?", LocalDate::class.java, orderId)!!
+        val slot = db.queryForObject("SELECT scheduled_time_slot FROM orders WHERE id=?", String::class.java, orderId)!!
+        (clock as TestClock).time.set(day.atTime(LocalTime.parse(slot.substring(0,5))).atZone(ZoneId.of("Asia/Jakarta")).toInstant())
+    }
+
     private fun receivedOrder(): UUID {
         val order = verifiedOrder()
+        atSchedule(order)
         lifecycle.updateFulfillment(farmer, order, FulfillmentUpdateRequest("siap_diambil"))
         lifecycle.updateFulfillment(farmer, order, FulfillmentUpdateRequest("menunggu_penerimaan"))
         lifecycle.receiveByBuyer(buyer, order)
@@ -955,9 +969,11 @@ class CheckoutIntegrationTest {
         val second = receivedOrder()
         val unpaid = awaitingPayment()
         assertThrows(ApiException::class.java) { refundRequest(unpaid) }
-        (clock as TestClock).time.set(Instant.parse("2026-11-11T00:00:00Z"))
+        val firstReceived = db.queryForObject("SELECT received_at FROM orders WHERE id=?", java.sql.Timestamp::class.java, first)!!.toInstant()
+        val secondReceived = db.queryForObject("SELECT received_at FROM orders WHERE id=?", java.sql.Timestamp::class.java, second)!!.toInstant()
+        (clock as TestClock).time.set(firstReceived.plus(Duration.ofHours(24)))
         assertEquals("diajukan", refundRequest(first).status)
-        (clock as TestClock).time.set(Instant.parse("2026-11-11T00:00:01Z"))
+        (clock as TestClock).time.set(secondReceived.plus(Duration.ofHours(24)).plusSeconds(1))
         assertThrows(ApiException::class.java) { refundRequest(second) }
     }
 
@@ -1077,6 +1093,7 @@ class CheckoutIntegrationTest {
         paymentDestinations.chooseForBuyer(buyer, order.orderId, paymentOption.id)
         val proof = paymentSubmissions.submit(buyer, order.orderId, "f7-delivery-payment", qrisUpload())
         paymentSubmissions.decide(farmer, order.orderId, com.panenku.backend.modules.shared.service.PaymentDecisionRequest(proof.id, "terima"))
+        atSchedule(order.orderId)
         lifecycle.updateFulfillment(farmer, order.orderId, FulfillmentUpdateRequest("diantar"))
         lifecycle.updateFulfillment(farmer, order.orderId, FulfillmentUpdateRequest("menunggu_penerimaan"))
         lifecycle.receiveByBuyer(buyer, order.orderId)
@@ -1174,6 +1191,7 @@ class CheckoutIntegrationTest {
         assertEquals("diproses", orderStatus(order))
         assertEquals("terverifikasi", db.queryForObject("SELECT payment_status FROM orders WHERE id=?", String::class.java, order))
         assertEquals("active", reservationStatus(order))
+        atSchedule(order)
         assertEquals("siap_diambil", lifecycle.updateFulfillment(farmer, order, FulfillmentUpdateRequest("siap_diambil")).orderStatus)
         assertEquals(2, db.queryForObject("SELECT count(*) FROM order_status_history WHERE order_id=? AND to_status IN ('verifikasi_pembayaran','diproses')", Int::class.java, order))
     }
@@ -1287,7 +1305,7 @@ class CheckoutIntegrationTest {
         val order = awaitingPayment()
         val offline = com.panenku.backend.modules.shared.service.PaymentSubmissionService(
             actors, orderRepository, orderHistoryRepository, db, userRepository, farmerProfileRepository,
-            productRepository, stockReservationRepository, paymentDestinations, mapper, clock, "")
+            productRepository, stockReservationRepository, paymentDestinations, mapper, clock, scheduleGuard, "")
         val error = assertThrows(ApiException::class.java) {
             org.springframework.transaction.support.TransactionTemplate(transactionManager).execute {
                 offline.submit(buyer, order, "proof-no-storage", qrisUpload())
@@ -2060,6 +2078,7 @@ class CheckoutIntegrationTest {
     @Test fun `F5 pickup fulfillment then buyer receive completes order`() {
         val id = orderFor(status = "diproses", payment = "terverifikasi")
 
+        atSchedule(id)
         val ready = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("siap_diambil"))
         assertEquals("siap_diambil", ready.orderStatus)
         assertEquals("active", reservationStatus(id))
@@ -2087,6 +2106,7 @@ class CheckoutIntegrationTest {
         assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, invalid.status)
         assertEquals("diproses", orderStatus(id))
 
+        atSchedule(id)
         val shipped = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("diantar"))
         assertEquals("diantar", shipped.orderStatus)
         val waiting = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("menunggu_penerimaan"))

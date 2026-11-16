@@ -50,7 +50,7 @@ class OrderLifecycleService(
     private val orderItems: OrderItemRepository,
     private val reservations: StockReservationRepository,
     private val history: OrderStatusHistoryRepository,
-    private val clock: Clock
+    private val clock: Clock, private val scheduleGuard: OrderScheduleGuard
 ) {
 
     @Transactional(readOnly = true)
@@ -141,6 +141,7 @@ class OrderLifecycleService(
             record(order, previous, target, actor, "petani", "Petani menolak pesanan. Alasan: $reason", now)
         } else {
             if (order.expiresAt <= now) conflict("Pesanan sudah melewati batas waktu respons petani.")
+            scheduleGuard.canAccept(order)
             order.orderStatus = target
             // Beri jendela 24 jam baru untuk pembeli mengunggah bukti pembayaran.
             order.expiresAt = now.plus(ORDER_WINDOW)
@@ -169,6 +170,7 @@ class OrderLifecycleService(
             invalid("Alasan gagal dipenuhi wajib diisi.")
         }
 
+        if (transition.targetStatus != OrderStatusRules.GAGAL_DIPENUHI) scheduleGuard.canFulfill(order)
         val now = Instant.now(clock)
         val previous = order.orderStatus
         when (transition.action) {
@@ -290,7 +292,9 @@ class OrderLifecycleService(
             updatedAt = order.updatedAt,
             receivedAt = order.receivedAt,
             items = items,
-            history = rows
+            history = rows,
+            effectiveSchedule = scheduleGuard.effective(order),
+            pendingScheduleChange = scheduleGuard.pending(order)
         )
     }
 

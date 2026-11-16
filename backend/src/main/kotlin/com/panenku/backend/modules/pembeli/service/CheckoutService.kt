@@ -27,7 +27,7 @@ class CheckoutService(
     private val orderItems: OrderItemRepository, private val reservations: StockReservationRepository,
     private val history: OrderStatusHistoryRepository, private val scheduling: SchedulingService,
     private val mapper: ObjectMapper, private val clock: Clock,
-    private val paymentDestinations: PaymentDestinationService
+    private val paymentDestinations: PaymentDestinationService, private val fulfillmentOptions: FulfillmentOptionsService
 ) {
     @Transactional
     fun checkout(actor: UUID, key: String, request: CheckoutRequest): OrderDTO {
@@ -66,15 +66,10 @@ class CheckoutService(
             if (item.quantityKg > product.available) conflict("Stok berubah atau tidak mencukupi.")
         }
         scheduling.validate(request.scheduledDate, request.scheduledTimeSlot, locked.map { it.readyDate }, CatalogService.split(farmer.timeSlots))
-        val fee = when (request.fulfillmentMethod) {
-            "pickup" -> 0L
-            "delivery" -> {
-                if (!farmer.shippingEnabled || request.deliveryAddress.isNullOrBlank() || request.deliveryDistrict.isNullOrBlank() ||
-                    CatalogService.split(farmer.serviceArea).none { it == request.deliveryDistrict }) invalid("Layanan antar atau kecamatan/alamat tidak tersedia.")
-                farmer.deliveryFee
-            }
-            else -> invalid("Metode pemenuhan harus pickup atau delivery.")
-        }
+        val fulfillment = FulfillmentRules.resolve(farmer, request.fulfillmentMethod, request.deliveryDistrict)
+        if (request.fulfillmentMethod == "delivery" && request.deliveryAddress.isNullOrBlank()) invalid("Alamat pengantaran wajib diisi.")
+        fulfillmentOptions.verifyToken(request.expectedFulfillmentToken, locked, farmer, request.fulfillmentMethod, request.deliveryDistrict)
+        val fee = fulfillment.fee
         if (fee != request.expectedDeliveryFee) conflict("Ongkir berubah. Konfirmasi ulang ongkir terbaru.")
         val limit = settings.lockByKey("transaction_limit")?.value?.toLongOrNull()?.takeIf { it > 0 } ?: conflict("Limit transaksi belum dikonfigurasi dengan benar.")
         val subtotals = locked.mapIndexed { index, p -> CheckoutMath.item(normalized.items[index].quantityKg, p.pricePerKg) }
@@ -84,8 +79,8 @@ class CheckoutService(
         val order = orders.saveAndFlush(Order(buyerId = actor, farmerId = farmerId, fulfillmentMethod = request.fulfillmentMethod,
             deliveryFee = fee, subtotalItems = total - fee, totalPayment = total, transactionLimitApplied = limit,
             scheduledDate = request.scheduledDate, scheduledTimeSlot = request.scheduledTimeSlot,
-            pickupLocationSnapshot = farmer.pickupLocation, deliveryAddressSnapshot = if (request.fulfillmentMethod == "delivery") request.deliveryAddress else null,
-            deliveryDistrictSnapshot = if (request.fulfillmentMethod == "delivery") request.deliveryDistrict else null,
+            pickupLocationSnapshot = fulfillment.pickupLocation, deliveryAddressSnapshot = if (request.fulfillmentMethod == "delivery") request.deliveryAddress else null,
+            deliveryDistrictSnapshot = fulfillment.district,
             buyerNotes = request.buyerNotes, reservedAt = now, expiresAt = now.plus(Duration.ofHours(24)), createdAt = now, updatedAt = now,
             idempotencyKey = key, requestHash = hash))
         paymentDestinations.saveOptions(order.id, paymentOptions)

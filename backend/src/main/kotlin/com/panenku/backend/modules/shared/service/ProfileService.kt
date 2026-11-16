@@ -22,7 +22,7 @@ data class FarmerProfileRequest(val storeName: String, val pickupLocation: Strin
 
 @Service
 class ProfileService(private val actors: ActorService, private val farmers: FarmerProfileRepository, private val buyers: BuyerProfileRepository,
-                     private val products: ProductRepository) {
+                     private val products: ProductRepository, private val scheduling: SchedulingService) {
     @Transactional(readOnly = true)
     fun account(actor: UUID): AccountProfileDTO {
         val user = actors.requireActiveForProfile(actor)
@@ -77,10 +77,8 @@ class ProfileService(private val actors: ActorService, private val farmers: Farm
         if (store.isBlank() || store.length > 255 || (location?.length ?: 0) > 2000) invalid("Nama toko atau lokasi tidak valid.")
         if (request.deliveryFee < 0) invalid("Ongkir tidak boleh negatif.")
         if (request.serviceArea.size > 100 || request.timeSlots.size > 100) invalid("Maksimal 100 area dan slot.")
-        val areas = request.serviceArea.map { it.trim().lowercase(Locale.ROOT) }
-        if (areas.any { it.length !in 1..100 || !Regex("[a-z0-9][a-z0-9 _-]*").matches(it) } || areas.distinct().size != areas.size) invalid("Identifier kecamatan tidak valid atau duplikat.")
-        val slots = request.timeSlots.map(String::trim)
-        if (slots.distinct().size != slots.size || slots.any { !validSlot(it) }) invalid("Slot harus HH:mm-HH:mm pada hari yang sama dan tidak duplikat.")
+        val areas = FulfillmentRules.areas(request.serviceArea)
+        val slots = scheduling.normalizeSlots(request.timeSlots)
         if (request.shippingEnabled && areas.isEmpty()) invalid("Isi minimal satu kecamatan untuk layanan antar.")
         if ((location == null || slots.isEmpty()) && products.existsByFarmerIdAndPublicationStatus(actor, "aktif")) {
             conflict("Toko dengan produk aktif memerlukan lokasi dan minimal satu slot waktu.")
@@ -90,10 +88,6 @@ class ProfileService(private val actors: ActorService, private val farmers: Farm
         return farmerDto(profile)
     }
 
-    private fun validSlot(slot: String): Boolean {
-        if (!Regex("[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}").matches(slot)) return false
-        return try { LocalTime.parse(slot.substring(0, 5)) < LocalTime.parse(slot.substring(6, 11)) } catch (_: Exception) { false }
-    }
     private fun farmerDto(p: com.panenku.backend.modules.shared.entity.FarmerProfile) = FarmerProfileDTO(p.storeName, p.ownerName,
         p.contactPhone, p.pickupLocation, CatalogService.split(p.serviceArea), p.deliveryFee, p.shippingEnabled, CatalogService.split(p.timeSlots), p.ktpStatus)
 }

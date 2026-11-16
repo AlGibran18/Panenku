@@ -47,7 +47,7 @@ class PaymentDestinationService(
     private val actors: ActorService, private val users: UserRepository,
     private val farmers: FarmerProfileRepository, private val methods: PaymentMethodRepository,
     private val orders: OrderRepository, private val db: JdbcTemplate, private val mapper: ObjectMapper,
-    private val clock: Clock,
+    private val clock: Clock, private val scheduleGuard: OrderScheduleGuard,
     @Value("\${panenku.storage.local-dir:}") private val storageDirectory: String,
     @Value("\${panenku.jwt.secret}") private val versionSecret: String
 ) {
@@ -203,6 +203,7 @@ class PaymentDestinationService(
         if (order.orderStatus in setOf("menunggu_petani", "ditolak", "dibatalkan", "kedaluwarsa")) {
             conflict("Tujuan pembayaran belum tersedia untuk status pesanan ini.")
         }
+        scheduleGuard.canPay(order)
         if (order.orderStatus == "menunggu_pembayaran" && !order.expiresAt.isAfter(Instant.now(clock))) {
             conflict("Batas waktu pembayaran sudah terlewati.")
         }

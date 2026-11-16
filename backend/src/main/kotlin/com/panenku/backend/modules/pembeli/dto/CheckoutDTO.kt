@@ -22,7 +22,8 @@ data class CheckoutRequest(
     val deliveryAddress: String? = null, val deliveryDistrict: String? = null, val buyerNotes: String? = null,
     // Omit null fields from historical request hashes so old idempotency keys remain replayable.
     @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodId: UUID? = null,
-    @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodVersion: String? = null
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodVersion: String? = null,
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val expectedFulfillmentToken: String? = null
 )
 data class OrderItemDTO(val productId: UUID, val productNameSnapshot: String, val commoditySnapshot: String,
     val readyDateSnapshot: LocalDate, val quantityKg: BigDecimal, val pricePerKgSnapshot: Long, val itemSubtotal: Long)
