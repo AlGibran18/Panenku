@@ -20,17 +20,17 @@ import java.util.UUID
 class ProductService(
     private val actors: ActorService, private val products: ProductRepository, private val commodities: CommodityRepository,
     private val farmers: FarmerProfileRepository, private val payments: PaymentMethodRepository, private val catalog: CatalogService,
-    private val clock: Clock
+    private val clock: Clock, private val photos: ProductPhotoStorage
 ) {
     fun list(actor: UUID, page: Int, size: Int): PageDTO<ProductDTO> {
         actors.require(actor, "petani")
         if (page < 0 || size !in 1..100) invalid("Paginasi tidak valid.")
         val result = products.findAllByFarmerId(actor, PageRequest.of(page, size, Sort.by("id")))
-        return PageDTO(result.content.map(catalog::dto), page, size, result.totalElements)
+        return PageDTO(catalog.dtos(result.content), page, size, result.totalElements)
     }
     fun detail(actor: UUID, id: UUID): ProductDTO { actors.require(actor, "petani"); return catalog.dto(owned(actor, id)) }
     fun save(actor: UUID, id: UUID?, request: ProductRequest): ProductDTO {
-        actors.require(actor, "petani")
+        actors.requireLocked(actor, "petani")
         val farmer = farmers.lockById(actor) ?: conflict("Lengkapi profil petani.")
         val commodity = commodities.lockById(request.commodityId) ?: missing("Komoditas tidak ditemukan.")
         if (!commodity.isActive) invalid("Komoditas nonaktif.")
@@ -39,19 +39,21 @@ class ProductService(
         if (request.publicationStatus !in listOf("draft", "aktif", "nonaktif")) invalid("Status publikasi tidak valid.")
         val stock = CheckoutMath.kg(request.stockPhysical, allowZero = true)
         if (stock < product.stockReserved) conflict("Stok fisik tidak boleh di bawah stok yang dicadangkan.")
+        if (!request.photoUrl.isNullOrBlank() && request.photoUrl != product.photoUrl)
+            invalid("Foto dikelola server. Buat draft lalu unggah melalui endpoint foto produk.")
         if (request.publicationStatus == "aktif") {
             if (farmer.ktpStatus != "disetujui") forbidden("KTP belum disetujui.")
             if (farmer.pickupLocation.isNullOrBlank() || payments.findAllByFarmerId(actor).none { it.complete() }) conflict("Lengkapi lokasi dan metode pembayaran.")
-            if (stock.signum() <= 0 || request.photoUrl.isNullOrBlank()) invalid("Produk aktif memerlukan stok dan foto.")
+            if (stock.signum() <= 0 || !photos.managed(product, product.photoUrl)) invalid("Produk aktif memerlukan stok positif dan foto yang sudah diunggah untuk produk ini.")
         }
         product.commodityId = request.commodityId; product.name = request.name.trim(); product.description = request.description
-        product.photoUrl = request.photoUrl; product.pricePerKg = request.pricePerKg; product.stockPhysical = stock
+        product.pricePerKg = request.pricePerKg; product.stockPhysical = stock
         product.readyDate = request.readyDate; product.publicationStatus = request.publicationStatus; product.updatedAt = Instant.now(clock)
         products.saveAndFlush(product)
         return catalog.dto(product)
     }
     fun deactivate(actor: UUID, id: UUID) {
-        actors.require(actor, "petani")
+        actors.requireLocked(actor, "petani")
         val product = owned(actor, id)
         product.publicationStatus = "nonaktif"; product.updatedAt = Instant.now(clock)
     }

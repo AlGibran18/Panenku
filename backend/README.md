@@ -6,30 +6,6 @@ Dikembangkan sebagai tugas akhir praktikum Pengembangan Aplikasi Perangkat Berge
 
 ---
 
-## Status implementasi backend bersama
-
-Backend Panenku dikerjakan oleh **Mochammad Fani Al Gibran (Gibran)** dan **Mohammad Geisar Rampan (Geisar/Rampan)**. Pembagian implementasi backend dua orang berikut mengikuti pembagian tugas terbaru; tabel anggota di bagian akhir tetap mencatat pembagian fungsi pada laporan praktikum.
-
-### Pembagian tugas backend
-
-| Penanggung jawab | Lingkup tanggung jawab | Status implementasi saat ini |
-|---|---|---|
-| **Gibran** | Katalog dan produk (F1), keranjang dan reservasi stok (F2), jadwal pengantaran (F3), perhitungan dan checkout atomik (F4) | Implementasi awal katalog, komoditas/produk, keranjang, validasi jadwal/area, snapshot, limit, reservasi stok atomik, dan idempotensi checkout tersedia. |
-| **Geisar / Rampan** | Auth dan user; status pesanan (F5); verifikasi pembayaran (F6); refund dan eskalasi (F7); admin/pengaturan; infrastruktur dan scheduler | Register/login JWT, profil awal, dan fondasi infrastruktur tersedia. Scheduler kedaluwarsa sudah diselaraskan dalam integrasi bersama. Status lanjutan, pembayaran, refund, admin, serta pengelolaan profil lanjutan masih perlu dilengkapi. |
-
-### Kontribusi dan integrasi
-
-- **Geisar** membuat struktur awal, README, serta spesifikasi backend; menambahkan [implementasi auth dan user](https://github.com/Geisarrr/Panenku/commit/ac3d65f33a8ded3e298e511b9366694f9bef8b4d) dan [fondasi infrastruktur/scheduler](https://github.com/Geisarrr/Panenku/commit/2d26973ba79ce5ddcc6cf991ba43f64f16bc2b15).
-- **Gibran** mengerjakan modul katalog/produk, keranjang, jadwal, checkout dan stok sesuai pembagian backend, dengan pengujian aturan bisnis serta konkurensi stok.
-- **Integrasi bersama** menyelaraskan konfigurasi build, entity/repository pengguna, JWT UUID, respons/error API, dan pelepasan stok kedaluwarsa. Build menggunakan JDK 17. Pengujian backend saat ini mencakup 39 tes yang telah lulus pada PostgreSQL melalui Testcontainers.
-
-Panduan teknis:
-
-- [Panduan modul katalog, keranjang, jadwal, dan checkout](docs/IMPLEMENTASI_GIBRAN.md).
-- [Catatan integrasi auth, infrastruktur, dan scheduler](docs/INTEGRASI_GEISAR.md).
-
-Diagram dan daftar endpoint di bawah merupakan spesifikasi target MVP; sebagian modul belum diimplementasikan. Helper upload MinIO masih berupa placeholder, sementara refresh/logout, pembayaran, refund, dan beberapa fungsi admin masih perlu diselesaikan.
-
 ## 📋 Ringkasan Proyek
 
 | Item | Detail |
@@ -54,8 +30,10 @@ Kami menggunakan **Layered Architecture** dengan pemisahan kode berdasarkan **pe
 ### Alur Permintaan
 
 ```
-Android App → Routes → Controller → Service → Repository → Database
+Android App → Controller → Service → Repository → Database
 ```
+
+> Spring MVC menangani routing lewat anotasi (`@GetMapping`, `@PostMapping`, dll) di Controller, sehingga tidak ada lapisan `Routes` terpisah.
 
 Setiap lapisan hanya boleh berkomunikasi dengan lapisan di bawahnya. Tidak boleh lompat layer.
 
@@ -75,11 +53,14 @@ Setiap lapisan hanya boleh berkomunikasi dengan lapisan di bawahnya. Tidak boleh
 | `common/` | Kode bersama semua role: JWT, exception handling, file storage, validasi decimal, idempotency |
 | `config/` | Konfigurasi environment, database, JWT, server port |
 | `scheduler/` | Background job (misal: kedaluwarsa pesanan 24 jam) |
-| `routes/` | Definisi endpoint API + middleware auth & role guard |
+
+> **Catatan implementasi:** proyek memakai Spring MVC, jadi **tidak ada folder `routes/`**. Mapping URL ditulis lewat anotasi di Controller, sedangkan autentikasi/otorisasi ditangani `config/SecurityConfig.kt` dan `common/security/ActorService.kt`.
 
 ---
 
 ## 📂 Struktur Folder
+
+> **Catatan:** struktur di bawah adalah **rancangan target**. Implementasi saat ini memakai Spring MVC sehingga tidak memiliki folder `routes/` dan memakai `resources/application.properties` (bukan `application.conf`). Perbedaan lain dicatat di bagian **Status Implementasi & Deviasi** di bawah.
 
 ```text
 backend/                              ← ROOT PROJECT (sudah ada)
@@ -195,6 +176,8 @@ Backend harus mengimplementasi aturan berikut:
 ---
 
 ## 🗄️ Skema Database Lengkap
+
+> **Catatan:** skema di bawah adalah **desain target MVP**. Skema yang benar-benar dijalankan saat ini ada di `src/main/resources/db/migration/V1–V4`. Perbedaan antara desain dan implementasi dicatat di bagian **Status Implementasi & Deviasi**.
 
 ### Konsep Umum
 
@@ -666,7 +649,7 @@ classDiagram
     AuthController ..> AuthService : uses
     AuthService ..> UserRepository : uses
     AuthService ..> User : manages
-    UserRepository ..> User : persists
+    UserRepository <|..| User : Spring Data JPA for
     
     %% ================================================================
     %% CORE DOMAIN: USER & PROFILES (1:1)
@@ -878,13 +861,13 @@ classDiagram
     
     class CheckoutController {
         <<REST Controller>>
-        +checkout(CheckoutRequest)
+        +POST /checkout
     }
     
     class OrderController {
         <<REST Controller>>
-        +listOrders()
-        +updateStatus(UUID, FulfillmentUpdateRequest)
+        +GET /orders
+        +PUT /orders/{id}/status
     }
     
     CheckoutController ..> CheckoutService : calls
@@ -928,7 +911,7 @@ classDiagram
     
     class CheckoutRequest {
         <<DTO>>
-        -items: List~CheckoutItemRequest~
+        -items: List<CartItemRequest>
         -fulfillmentMethod: String
         -scheduledDate: LocalDate
     }
@@ -954,7 +937,7 @@ classDiagram
 | `<<JpaRepository>>` | Interface Spring Data JPA untuk akses DB | `UserRepository`, `OrderRepository` |
 | `<<DTO>>` | Data Transfer Object untuk request/response | `CheckoutRequest`, `OrderDTO` |
 | `<<Utility>>` / `<<Filter>>` / `<<Controller Advice>>` | Komponen penunjang umum | `JwtProvider`, `RoleGuard`, `ExceptionHandler` |
-| `..|>` | Implementasi interface | `UserRepository ..|> JpaRepository` |
+| `--|>` | Inheritance / Implementasi | `UserRepository <|..| User` |
 | `*--` | Komposisi (milik, tidak bisa berdiri sendiri) | `Order *-- OrderItem` |
 | `o--` | Asosiasi (terhubung tapi independen) | `User o-- FarmerProfile` |
 | `..>` | Dependency / penggunaan | `Controller ..> Service` |
@@ -1150,6 +1133,8 @@ Content-Type: application/json
 }
 ```
 
+> **Status implementasi:** respons login saat ini baru mengembalikan **access token** berupa string pada field `data`. Refresh token, logout, dan refresh endpoint masih direncanakan (lihat **Status Implementasi & Deviasi**).
+
 ### Checkout (Pembeli)
 
 **Request:**
@@ -1190,6 +1175,8 @@ Content-Type: application/json
   "timestamp": "2026-11-10T10:00:00Z"
 }
 ```
+
+> **Status implementasi:** selain field di atas, checkout saat ini juga mewajibkan `expectedPricePerKg` per item, `expectedDeliveryFee`, `scheduledTimeSlot`, dan `deliveryDistrict` (untuk pengantaran) sebagai konfirmasi harga/ongkir/jadwal.
 
 ### Verifikasi Bukti Pembayaran (Petani)
 
@@ -1275,7 +1262,8 @@ Content-Type: application/json
 
 - Password di-hash dengan **bcrypt** atau **argon2** (minimal 8 karakter).
 - JWT Access Token (short-lived) + Refresh Token (long-lived).
-- Semua endpoint mutatif memvalidasi: **aktor, status sebelumnya, dan kepemilikan data**.
+  > Status saat ini: baru access token yang diimplementasikan; refresh token masih direncanakan.
+- Semua endpoint mutatif memvalidasi: **aktor, status sebelumnya, dan kepemilikan data**. Role dicek ulang ke database lewat `ActorService`, bukan hanya dari klaim token.
 - File upload maksimal 5 MB (JPEG/PNG), disimpan privat (MinIO/S3), diakses lewat signed URL.
 - Audit log untuk setiap tindakan admin (siapa, kapan, aksi apa, target, alasan).
 
@@ -1297,25 +1285,24 @@ Content-Type: application/json
 ## 🚀 Cara Menjalankan
 
 ### Prasyarat
-- JDK 17 (untuk konfigurasi build saat ini)
+- JDK 17+
 - Docker & Docker Compose (untuk PostgreSQL & MinIO)
 - Gradle
 
 ### Menjalankan dengan Docker Compose
 
 ```bash
-cd backend
+cd /Users/geisarrampan/AndroidStudioProjects/Panenku/backend
 
-# Siapkan .env dari .env.example, isi DB_PASSWORD dan JWT_SECRET
-cp .env.example .env
-# Jalankan PostgreSQL
-docker compose up -d
-# Export variabel .env di shell atau atur environment pada IDE sebelum bootRun
+# Jalankan database dan storage
+docker-compose up -d
 
 # Build dan jalankan aplikasi
 ./gradlew build
 ./gradlew bootRun
 ```
+
+> `./gradlew run` tidak tersedia karena proyek memakai plugin Spring Boot; gunakan `./gradlew bootRun`. Test integrasi memakai Testcontainers sehingga **Docker harus berjalan** saat menjalankan `./gradlew build` atau `./gradlew test`. Variabel `.env` tidak dibaca otomatis oleh Spring Boot; ekspor variabelnya atau jalankan lewat `docker-compose`.
 
 ### Environment Variable (contoh `.env`)
 
@@ -1323,7 +1310,7 @@ docker compose up -d
 DB_URL=jdbc:postgresql://localhost:5432/panenku
 DB_USER=panenku
 DB_PASSWORD=panenku
-JWT_SECRET=your-secret-key
+JWT_SECRET=ganti-dengan-secret-minimal-32-byte-utf8
 JWT_EXPIRATION=86400000
 MINIO_ENDPOINT=localhost:9000
 MINIO_ACCESS_KEY=minioadmin
@@ -1346,6 +1333,58 @@ SERVER_PORT=8080
 
 ---
 
+## 🧭 Status Implementasi & Deviasi
+
+Bagian ini memisahkan **desain target** (isi README di atas) dari **kondisi kode saat ini**. Sumber kebenaran skema yang sudah berjalan adalah `src/main/resources/db/migration/V1–V4`, bukan tabel desain di atas.
+
+### Endpoint yang sudah tersedia
+
+| Modul | Endpoint |
+|-------|----------|
+| Auth | `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `GET /api/v1/auth/me` |
+| Pembeli | `GET /api/v1/buyer/products`, `GET /api/v1/buyer/products/{id}`, `GET /api/v1/buyer/commodities` |
+| Pembeli | `GET/POST/PUT/DELETE /api/v1/buyer/cart...`, `POST /api/v1/buyer/checkout` |
+| Pembeli (F5) | `GET /api/v1/buyer/orders`, `GET /api/v1/buyer/orders/{id}`, `POST /api/v1/buyer/orders/{id}/cancel`, `POST /api/v1/buyer/orders/{id}/receive` |
+| Petani | `GET/POST/PUT/DELETE /api/v1/petani/products...` |
+| Petani (F5) | `GET /api/v1/petani/orders`, `GET /api/v1/petani/orders/{id}`, `PUT /api/v1/petani/orders/{id}/respond`, `PUT /api/v1/petani/orders/{id}/fulfillment` |
+| Admin | `GET/POST/PUT /api/v1/admin/commodities...` |
+| Admin | `PUT /api/v1/admin/farmers/{id}/verify`, `PUT /api/v1/admin/users/{id}/suspend` |
+
+Sisanya (bukti pembayaran, verifikasi pembayaran, review, refund, eskalasi, notifikasi, payment method petani, profil petani, settings limit, audit-log list, dispute admin) masih **direncanakan**.
+
+> **Catatan F5:** transisi status mengikuti state machine di README. Pembatalan/penolakan/`gagal_dipenuhi` melepas reservasi stok; transisi ke `menunggu_penerimaan` memenuhi reservasi (mengurangi `stock_reserved` dan `stock_physical`). Perubahan status pemenuhan mensyaratkan `payment_status = 'terverifikasi'`, yang baru bisa dipenuhi setelah endpoint F6 tersedia.
+
+### Tabel yang sudah ada migrasinya
+
+`users`, `farmer_profiles`, `buyer_profiles`, `commodities`, `products`, `farmer_payment_methods`, `settings`, `cart`, `orders`, `order_items`, `stock_reservations`, `order_status_history`, `audit_logs`.
+
+Belum ada migrasi: `payment_submissions`, `reviews`, `refunds`, `notifications` (target Tahap 3–4).
+
+### Deviasi desain vs implementasi
+
+| Area | Desain README | Implementasi saat ini | Keterangan |
+|------|---------------|------------------------|------------|
+| `settings` | `id UUID`, `setting_key`, `setting_value`, `changed_by`, `changed_at`, `reason` | `key` (PK), `value`, `updated_by`, `updated_at` | Mengikuti Flyway V1. Bila desain awal tetap diinginkan, ubah lewat migrasi baru (mis. V5), jangan edit V1. |
+| `audit_logs` | `old_values`/`new_values` JSONB | `old_values`/`new_values` TEXT | Flyway V4. Nilai aksi memakai kode uppercase, mis. `VERIFY_KTP_APPROVED`, `USER_SUSPENDED`. |
+| `order_status_history.actor_id` | NOT NULL | NULL diperbolehkan untuk `actor_role='system'` | Flyway V3, agar scheduler bisa mencatat kedaluwarsa tanpa impersonasi user. |
+| Login | `accessToken` + `refreshToken` + `user` | `data` berisi access token (string) | Refresh/logout belum ada; data user diambil dari `GET /auth/me`. |
+| Status code | Ada 422 Unprocessable Entity | 400/403/404/409 | 422 belum dipakai; pelanggaran aturan bisnis dikembalikan sebagai 400/403/409. |
+| Tambah produk | Wajib KTP disetujui | `draft` boleh tanpa KTP; publish `aktif` wajib KTP disetujui + metode bayar + foto + stok | Mengikuti aturan bisnis produk aktif. |
+| File storage | Upload KTP/bukti via MinIO | `FileStorage` tersedia, endpoint upload belum | Akan mengembalikan 503 bila konfigurasi MinIO kosong. |
+| Folder | Ada `routes/`, `application.conf` | Spring MVC tanpa `routes/`, memakai `application.properties` | Spring Boot menangani routing via anotasi Controller. |
+
+### Testing
+
+```bash
+# Unit test (tanpa Docker)
+./gradlew test --tests "com.panenku.backend.CheckoutRulesTest" --tests "com.panenku.backend.SchedulerWiringTest" --tests "com.panenku.backend.OrderStatusRulesTest"
+
+# Semua test termasuk integrasi F5 (butuh Docker untuk Testcontainers)
+./gradlew test
+```
+
+---
+
 ## 📖 Referensi
 
 - [PRD Panenku MVP Android v1.0](/Users/geisarrampan/Downloads/PRD_Panenku_MVP_Android_v1.md)
@@ -1358,10 +1397,24 @@ SERVER_PORT=8080
 
 | Nama | NIM | Fungsi Utama |
 |------|-----|--------------|
-| Mochammad Fani Al Gibran | 245150207111008 | F2 Reservasi Stok & F4 Perhitungan Checkout |
-| Mohammad Geisar Rampan | 245150207111038 | F5 Status Pesanan & F6 Verifikasi Pembayaran |
-| Ifka Rosmalita Nur Nazjila | 245150207111022 | F7 Refund |
-| Hanifa Nur Mawaddah | 245150200111027 | F1 Katalog Produk & F3 Jadwal Pengantaran |
+| Mochammad Fani Al Gibran | 245150207111008 | F1 Katalog & Produk, F2 Reservasi Stok & F4 Perhitungan Checkout |
+| Mohammad Geisar Rampan | 245150207111038 | F3 Jadwal Pengantara, F5 Status Pesanan & F6 Verifikasi Pembayaran & F7 Refund |
+
+
+## Jobdesk Fitur Backend
+
+| Fitur | Owner |
+|---|---|
+| **F1 Katalog & Produk** | Gibran |
+| **F2 Keranjang & Reservasi Stok** | Gibran |
+| **F3 Jadwal Pengantara** | Gibran |
+| **F4 Perhitungan Checkout** | Gibran |
+| **F5 Status Pesanan** | Rampan |
+| **F6 Verifikasi Pembayaran** | Rampan (belum fully implement) |
+| **F7 Refund** | Rampan (telah dialihkan dari Ifka) |
+| **Auth & User** | Rampan + Gibran (sama-sama) |
+| **Admin** | Rampan (sama-sama) |
+| **Scheduler/Infra** | Rampan |
 
 ---
 

@@ -4,7 +4,8 @@ import jakarta.persistence.*
 import java.util.UUID
 
 // Shared profile mappings used by auth, catalog and checkout.
-@Entity @Table(name = "farmer_profiles")
+@Entity
+@Table(name = "farmer_profiles")
 class FarmerProfile(
     @Id var id: UUID = UUID.randomUUID(),
     var storeName: String = "",
@@ -15,10 +16,16 @@ class FarmerProfile(
     var shippingEnabled: Boolean = false,
     var ktpStatus: String = "belum_diajukan",
     // Pipe-separated slots, e.g. 08:00-10:00|13:00-15:00; managed by profile module.
-    var timeSlots: String = ""
+    var timeSlots: String = "",
+    var ktpRejectionReason: String? = null,
+    var ktpDocumentPath: String? = null,
+    var ktpSubmittedAt: java.time.Instant? = null,
+    var ktpReviewedAt: java.time.Instant? = null,
+    var ktpReviewedBy: UUID? = null
 )
 
-@Entity @Table(name = "farmer_payment_methods")
+@Entity
+@Table(name = "farmer_payment_methods")
 class FarmerPaymentMethod(
     @Id var id: UUID = UUID.randomUUID(),
     var farmerId: UUID = UUID.randomUUID(),
@@ -35,5 +42,10 @@ class FarmerPaymentMethod(
     }
 }
 
-@Entity @Table(name = "settings")
-class Setting(@Id var key: String = "transaction_limit", var value: String = "10000000")
+@Entity
+@Table(name = "settings")
+class Setting(
+    @Id var key: String = "transaction_limit",
+    var value: String = "10000000",
+    var updatedBy: UUID? = null
+)

@@ -12,7 +12,11 @@ import com.panenku.backend.modules.pembeli.dto.*
 import com.panenku.backend.modules.pembeli.service.*
 import com.panenku.backend.modules.petani.dto.ProductRequest
 import com.panenku.backend.modules.petani.service.ProductService
+import com.panenku.backend.modules.shared.dto.FulfillmentUpdateRequest
+import com.panenku.backend.modules.shared.dto.OrderCancelRequest
+import com.panenku.backend.modules.shared.dto.OrderRespondRequest
 import com.panenku.backend.modules.shared.service.CatalogService
+import com.panenku.backend.modules.shared.service.OrderLifecycleService
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -52,15 +56,24 @@ class CheckoutIntegrationTest {
             registry.add("spring.datasource.password", postgres::getPassword)
         }
     }
-    @TestConfiguration class FixedTime {
-        @Bean @Primary fun fixedClock(): Clock = Clock.fixed(Instant.parse("2026-11-10T00:00:00Z"), ZoneOffset.UTC)
+    class TestClock : Clock() {
+        val time = java.util.concurrent.atomic.AtomicReference(Instant.parse("2026-11-10T00:00:00Z"))
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = Clock.fixed(time.get(), zone)
+        override fun instant(): Instant = time.get()
     }
+    @TestConfiguration class FixedTime {
+        @Bean @Primary fun fixedClock(): Clock = TestClock()
+    }
+    @Autowired lateinit var clock: Clock
     @Autowired lateinit var db: JdbcTemplate
+    @Autowired lateinit var jwtProvider: com.panenku.backend.common.auth.JwtProvider
     @Autowired lateinit var expiration: com.panenku.backend.scheduler.OrderExpirationService
     @Autowired lateinit var orderRepository: com.panenku.backend.modules.pembeli.repository.OrderRepository
     @Autowired lateinit var appConfig: com.panenku.backend.config.AppConfig
     @Autowired lateinit var checkout: CheckoutService
     @Autowired lateinit var cart: CartService
+    @Autowired lateinit var lifecycle: OrderLifecycleService
     @Autowired lateinit var productService: ProductService
     @Autowired lateinit var catalog: CatalogService
     @Autowired lateinit var mvc: MockMvc
@@ -74,6 +87,7 @@ class CheckoutIntegrationTest {
     val secondProduct = UUID.fromString("00000000-0000-0000-0000-000000000007")
     val date = LocalDate.parse("2026-11-12")
     @BeforeEach fun seed() {
+        (clock as TestClock).time.set(Instant.parse("2026-11-10T00:00:00Z"))
         db.execute("TRUNCATE order_status_history, stock_reservations, order_items, orders, cart, products, commodities, farmer_payment_methods, farmer_profiles, users CASCADE")
         listOf(buyer to "pembeli", otherBuyer to "pembeli", farmer to "petani", otherFarmer to "petani").forEach { (id, role) ->
             db.update("INSERT INTO users(id,email,password_hash,role) VALUES (?,?,?,?)", id, "$id@example.test", "dummy-hash", role)
@@ -92,9 +106,32 @@ class CheckoutIntegrationTest {
     }
     fun request(quantity: String = "0.75", price: Long = 12000): CheckoutRequest = CheckoutRequest(
         listOf(CheckoutItemRequest(product, BigDecimal(quantity), price)), "pickup", date, "08:00-10:00", 0)
+    fun deliveryRequest(quantity: String = "0.75"): CheckoutRequest = request(quantity).copy(
+        fulfillmentMethod = "delivery", expectedDeliveryFee = 10000,
+        deliveryAddress = "Alamat dummy", deliveryDistrict = "kepanjen")
+    /**
+     * Membuat pesanan lalu memaksa status lewat SQL. Status pemenuhan F5 membutuhkan
+     * pembayaran terverifikasi, sedangkan endpoint F6 belum tersedia.
+     */
+    fun orderFor(
+        req: CheckoutRequest = request(),
+        status: String = "menunggu_petani",
+        payment: String = "belum_dibayar",
+        owner: UUID = buyer
+    ): UUID {
+        val order = checkout.checkout(owner, "f5-${UUID.randomUUID()}", req)
+        db.update("UPDATE orders SET order_status=?, payment_status=? WHERE id=?", status, payment, order.orderId)
+        return order.orderId
+    }
+    fun stockPhysical(): BigDecimal =
+        db.queryForObject("SELECT stock_physical FROM products WHERE id=?", BigDecimal::class.java, product)!!
+    fun reservationStatus(orderId: UUID): String =
+        db.queryForObject("SELECT status FROM stock_reservations WHERE order_id=?", String::class.java, orderId)!!
+    fun orderStatus(orderId: UUID): String =
+        db.queryForObject("SELECT order_status FROM orders WHERE id=?", String::class.java, orderId)!!
     fun count(table: String): Long = db.queryForObject("SELECT count(*) FROM $table", Long::class.java)!!
     fun reserved(): BigDecimal = db.queryForObject("SELECT stock_reserved FROM products WHERE id=?", BigDecimal::class.java, product)!!
-    fun parallel(first: () -> OrderDTO, second: () -> OrderDTO): List<Result<OrderDTO>> {
+    fun <T> parallel(first: () -> T, second: () -> T): List<Result<T>> {
         val pool = Executors.newFixedThreadPool(2)
         val ready = CountDownLatch(2); val start = CountDownLatch(1)
         try {
@@ -187,6 +224,130 @@ class CheckoutIntegrationTest {
         assertEquals(86400000L, appConfig.jwt.expiration)
         assertEquals("localhost:9000", appConfig.minio.endpoint)
         assertEquals("panenku-files", appConfig.minio.bucket)
+    }
+
+    @Test fun `audit fractional rupiah and null or missing fee are rejected`() {
+        val requestJson = mapper.readTree(mapper.writeValueAsString(request())) as com.fasterxml.jackson.databind.node.ObjectNode
+        val invalidBodies = listOf(
+            requestJson.deepCopy().apply { put("expectedDeliveryFee", 0.9) },
+            requestJson.deepCopy().apply { putNull("expectedDeliveryFee") },
+            requestJson.deepCopy().apply { remove("expectedDeliveryFee") },
+            requestJson.deepCopy().apply { (get("items")[0] as com.fasterxml.jackson.databind.node.ObjectNode).put("expectedPricePerKg", 12000.9) }
+        )
+        invalidBodies.forEachIndexed { i, body ->
+            mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
+                .header("Idempotency-Key", "audit-numeric-$i").contentType(MediaType.APPLICATION_JSON).content(body.toString()))
+                .andExpect(status().isBadRequest).andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+        }
+        assertEquals(0L, count("orders"))
+    }
+    @Test fun `audit missing idempotency header returns documented JSON error`() {
+        mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request())))
+            .andExpect(status().isBadRequest).andExpect(jsonPath("$.success").value(false)).andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+    }
+    @Test fun `audit authentication failures return JSON and retain bearer challenge`() {
+        listOf(null, "Bearer forged").forEach { authorizationHeader ->
+            val req = get("/api/v1/buyer/cart")
+            if (authorizationHeader != null) req.header("Authorization", authorizationHeader)
+            mvc.perform(req).andExpect(status().isUnauthorized).andExpect(header().exists("WWW-Authenticate"))
+                .andExpect(jsonPath("$.success").value(false)).andExpect(jsonPath("$.code").value("UNAUTHORIZED"))
+        }
+    }
+    @Test fun `audit JWT helper rejects token without expiration`() {
+        val token = SignedJWT(JWSHeader(JWSAlgorithm.HS256), JWTClaimsSet.Builder().subject(buyer.toString()).issuer("panenku").build())
+        token.sign(MACSigner("test-only-32-byte-secret-for-tests-123456789"))
+        assertFalse(jwtProvider.validateToken(token.serialize()))
+    }
+    @Test fun `audit catalog filters invalid farmer role and uses locale independent search`() {
+        val previous = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+            assertEquals(1, catalog.list("SAWI", null, "price_asc", 0, 20).items.size)
+        } finally { java.util.Locale.setDefault(previous) }
+        db.update("UPDATE users SET role='pembeli' WHERE id=?", farmer)
+        assertEquals(0L, catalog.list("", null, "price_asc", 0, 20).totalElements)
+    }
+    @Test fun `audit unconfigured storage never reports a successful upload or deletion`() {
+        val storage = com.panenku.backend.common.storage.FileStorage()
+        val file = org.springframework.mock.web.MockMultipartFile("file", "dummy.jpg", "image/jpeg", byteArrayOf(1, 2, 3))
+        val upload = assertThrows(ApiException::class.java) { storage.upload("payment", file) }
+        assertEquals(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, upload.status)
+        val deletion = assertThrows(ApiException::class.java) { storage.delete("payment/dummy.jpg") }
+        assertEquals(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, deletion.status)
+    }
+    @Test fun `audit independent buyers may use the same idempotency key`() {
+        val results = parallel({ checkout.checkout(buyer, "client-key", request()) }, { checkout.checkout(otherBuyer, "client-key", request()) })
+        assertTrue(results.all { it.isSuccess }, results.toString())
+        assertNotEquals(results[0].getOrThrow().orderId, results[1].getOrThrow().orderId)
+        assertEquals(2L, count("orders")); assertEquals(BigDecimal("1.50"), reserved())
+    }
+    @Test fun `audit checkout racing with expiration cannot corrupt stock`() {
+        db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)
+        val old = checkout.checkout(buyer, "audit-old", request())
+        val results = parallel(
+            { assertTrue(expiration.expire(old.orderId, farmer, old.expiresAt)); old },
+            { checkout.checkout(otherBuyer, "audit-new", request()) }
+        )
+        assertTrue(results[0].isSuccess, results.toString())
+        if (results[1].isFailure) assertTrue(results[1].exceptionOrNull() is ApiException)
+        val active = db.queryForObject("SELECT coalesce(sum(quantity_kg),0) FROM stock_reservations WHERE product_id=? AND status='active'", BigDecimal::class.java, product)!!
+        assertEquals(0, active.compareTo(reserved()))
+        assertTrue(active <= BigDecimal.ONE)
+        assertEquals("released", db.queryForObject("SELECT status FROM stock_reservations WHERE order_id=?", String::class.java, old.orderId))
+        assertEquals(BigDecimal("1.00"), db.queryForObject("SELECT stock_physical FROM products WHERE id=?", BigDecimal::class.java, product))
+    }
+
+    @Test fun `audit me returns current role and status without credentials`() {
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()).claim("role", "admin") }))
+            .andExpect(status().isOk).andExpect(jsonPath("$.data.id").value(buyer.toString()))
+            .andExpect(jsonPath("$.data.role").value("pembeli")).andExpect(jsonPath("$.data.status").value("active"))
+            .andExpect(jsonPath("$.data.passwordHash").doesNotExist())
+        db.update("UPDATE users SET status='suspended' WHERE id=?", buyer)
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isOk).andExpect(jsonPath("$.data.status").value("suspended"))
+        mvc.perform(get("/api/v1/buyer/cart").with(jwt().jwt { it.subject(buyer.toString()) })).andExpect(status().isForbidden)
+        db.update("DELETE FROM users WHERE id=?", buyer)
+        mvc.perform(get("/api/v1/auth/me").with(jwt().jwt { it.subject(buyer.toString()) })).andExpect(status().isUnauthorized)
+    }
+    @Test fun `audit invalid or absent JWT subject is unauthorized`() {
+        listOf(null, "not-a-uuid").forEach { subject ->
+            val claims = JWTClaimsSet.Builder().issuer("panenku").expirationTime(Date.from(Instant.parse("2026-11-10T01:00:00Z")))
+            if (subject != null) claims.subject(subject)
+            val token = SignedJWT(JWSHeader(JWSAlgorithm.HS256), claims.build())
+            token.sign(MACSigner("test-only-32-byte-secret-for-tests-123456789"))
+            assertFalse(jwtProvider.validateToken(token.serialize()))
+            mvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + token.serialize()))
+                .andExpect(status().isUnauthorized).andExpect(jsonPath("$.code").value("UNAUTHORIZED"))
+        }
+    }
+    @Test fun `audit HTTP routing errors have stable JSON responses`() {
+        mvc.perform(put("/api/v1/auth/login").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+            .andExpect(status().isMethodNotAllowed).andExpect(header().string("Allow", org.hamcrest.Matchers.containsString("POST")))
+            .andExpect(jsonPath("$.code").value("METHOD_NOT_ALLOWED"))
+        mvc.perform(post("/api/v1/buyer/cart/items").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.TEXT_PLAIN).content("not JSON"))
+            .andExpect(status().isUnsupportedMediaType).andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"))
+        mvc.perform(get("/api/v1/buyer/not-implemented").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isNotFound).andExpect(jsonPath("$.code").value("NOT_FOUND"))
+    }
+
+    @Test fun `audit concurrent registrations cannot duplicate email or profile`() {
+        val body = """{"email":"audit.race@example.test","password":"password123","role":"pembeli","fullName":"Nama"}"""
+        val results = parallel({ register(body).andReturn().response.status }, { register(body).andReturn().response.status })
+        assertTrue(results.all { it.isSuccess }, results.toString())
+        assertEquals(listOf(201, 409), results.map { it.getOrThrow() }.sorted())
+        assertEquals(5L, count("users")); assertEquals(1L, count("buyer_profiles"))
+    }
+
+    @Test fun `audit first checkout and persisted replay have identical timestamp precision`() {
+        (clock as TestClock).time.set(Instant.parse("2026-11-10T00:00:00.123456789Z"))
+        val first = checkout.checkout(buyer, "audit-microseconds", request())
+        val replay = checkout.checkout(buyer, "audit-microseconds", request())
+        assertEquals(first, replay)
+        assertEquals(Instant.parse("2026-11-11T00:00:00.123456Z"), first.expiresAt)
+        assertEquals(1L, count("orders")); assertEquals(BigDecimal("0.75"), reserved())
     }
     @Test fun `UAT04 two buyers cannot oversell last kilogram`() {
         db.update("UPDATE products SET stock_physical=1 WHERE id=?", product)
@@ -288,7 +449,7 @@ class CheckoutIntegrationTest {
     }
     @Test fun `UAT02 unverified farmer can save draft but cannot publish`() {
         db.update("UPDATE farmer_profiles SET ktp_status='menunggu' WHERE id=?", farmer)
-        val req = ProductRequest(commodity, "Draft", 10000, BigDecimal.ONE, date, photoUrl = "products/dummy.jpg")
+        val req = ProductRequest(commodity, "Draft", 10000, BigDecimal.ONE, date)
         assertEquals("draft", productService.save(farmer, null, req).publicationStatus)
         assertThrows(ApiException::class.java) { productService.save(farmer, null, req.copy(publicationStatus = "aktif")) }
         assertThrows(ApiException::class.java) { checkout.checkout(buyer, "unverified", request()) }
@@ -383,9 +544,9 @@ class CheckoutIntegrationTest {
         db.execute("CREATE FUNCTION test_fail_profile() RETURNS TRIGGER LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''simulated profile failure''; END;'")
         db.execute("CREATE TRIGGER test_profile_failure BEFORE INSERT ON buyer_profiles FOR EACH ROW EXECUTE FUNCTION test_fail_profile()")
         try {
-            assertThrows(Exception::class.java) {
-                register("""{"email":"rollback@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""")
-            }
+            register("""{"email":"rollback@example.test","password":"password123","role":"pembeli","fullName":"Nama"}""")
+                .andExpect(status().isInternalServerError).andExpect(jsonPath("$.code").value("INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.message").value("Terjadi kesalahan server. Silakan coba lagi."))
             assertEquals(4L, count("users")); assertEquals(0L, count("buyer_profiles"))
         } finally { db.execute("DROP TRIGGER test_profile_failure ON buyer_profiles"); db.execute("DROP FUNCTION test_fail_profile()") }
     }
@@ -399,5 +560,184 @@ class CheckoutIntegrationTest {
         mvc.perform(post("/api/v1/buyer/checkout").with(jwt().jwt { it.subject(buyer.toString()) })
             .header("Idempotency-Key", "http-checkout").contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(request())))
             .andExpect(status().isCreated).andExpect(jsonPath("$.data.orderStatus").value("menunggu_petani"))
+    }
+
+    @Test fun `F5 farmer accepting resets payment window and records history`() {
+        val id = orderFor()
+        (clock as TestClock).time.set(Instant.parse("2026-11-10T01:00:00Z"))
+        val view = lifecycle.respondByFarmer(farmer, id, OrderRespondRequest("terima"))
+
+        assertEquals("menunggu_pembayaran", view.orderStatus)
+        assertEquals(Instant.parse("2026-11-11T01:00:00Z"), view.expiresAt)
+        assertEquals(2, view.history.size)
+        assertEquals("petani", view.history.last().actorRole)
+        assertEquals("menunggu_petani", view.history.last().fromStatus)
+        assertEquals("menunggu_pembayaran", view.history.last().toStatus)
+        assertEquals("active", reservationStatus(id))
+        assertEquals(BigDecimal("0.75"), reserved())
+    }
+
+    @Test fun `F5 rejecting requires reason and releases stock`() {
+        val id = orderFor()
+
+        val missingReason = assertThrows(ApiException::class.java) {
+            lifecycle.respondByFarmer(farmer, id, OrderRespondRequest("tolak"))
+        }
+        assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, missingReason.status)
+        assertEquals("menunggu_petani", orderStatus(id))
+        assertEquals(BigDecimal("0.75"), reserved())
+
+        assertThrows(ApiException::class.java) {
+            lifecycle.respondByFarmer(otherFarmer, id, OrderRespondRequest("tolak", "bukan milik saya"))
+        }
+        assertEquals("menunggu_petani", orderStatus(id))
+
+        val view = lifecycle.respondByFarmer(farmer, id, OrderRespondRequest("tolak", "Stok habis"))
+        assertEquals("ditolak", view.orderStatus)
+        assertEquals("released", reservationStatus(id))
+        assertEquals(BigDecimal("0.00"), reserved())
+        assertEquals(BigDecimal("10.00"), stockPhysical())
+    }
+
+    @Test fun `F5 buyer can cancel only before farmer responds`() {
+        val id = orderFor()
+        val view = lifecycle.cancelByBuyer(buyer, id, OrderCancelRequest("berubah pikiran"))
+
+        assertEquals("dibatalkan", view.orderStatus)
+        assertEquals("released", reservationStatus(id))
+        assertEquals(BigDecimal("0.00"), reserved())
+        assertTrue(view.history.last().note!!.contains("berubah pikiran"))
+
+        val accepted = orderFor(status = "menunggu_pembayaran")
+        val conflict = assertThrows(ApiException::class.java) {
+            lifecycle.cancelByBuyer(buyer, accepted, OrderCancelRequest())
+        }
+        assertEquals(org.springframework.http.HttpStatus.CONFLICT, conflict.status)
+        assertEquals("menunggu_pembayaran", orderStatus(accepted))
+
+        val otherBuyersOrder = orderFor()
+        assertThrows(ApiException::class.java) {
+            lifecycle.cancelByBuyer(otherBuyer, otherBuyersOrder, OrderCancelRequest())
+        }
+        assertEquals("menunggu_petani", orderStatus(otherBuyersOrder))
+    }
+
+    @Test fun `F5 pickup fulfillment then buyer receive completes order`() {
+        val id = orderFor(status = "diproses", payment = "terverifikasi")
+
+        val ready = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("siap_diambil"))
+        assertEquals("siap_diambil", ready.orderStatus)
+        assertEquals("active", reservationStatus(id))
+        assertEquals(BigDecimal("0.75"), reserved())
+        assertEquals(BigDecimal("10.00"), stockPhysical())
+
+        val waiting = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("menunggu_penerimaan"))
+        assertEquals("menunggu_penerimaan", waiting.orderStatus)
+        assertEquals("fulfilled", reservationStatus(id))
+        assertEquals(BigDecimal("0.00"), reserved())
+        assertEquals(BigDecimal("9.25"), stockPhysical())
+
+        val done = lifecycle.receiveByBuyer(buyer, id)
+        assertEquals("selesai", done.orderStatus)
+        assertNotNull(done.receivedAt)
+        assertEquals("selesai", orderStatus(id))
+    }
+
+    @Test fun `F5 delivery fulfillment rejects pickup status`() {
+        val id = orderFor(req = deliveryRequest(), status = "diproses", payment = "terverifikasi")
+
+        val invalid = assertThrows(ApiException::class.java) {
+            lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("siap_diambil"))
+        }
+        assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, invalid.status)
+        assertEquals("diproses", orderStatus(id))
+
+        val shipped = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("diantar"))
+        assertEquals("diantar", shipped.orderStatus)
+        val waiting = lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("menunggu_penerimaan"))
+        assertEquals("menunggu_penerimaan", waiting.orderStatus)
+        assertEquals(BigDecimal("9.25"), stockPhysical())
+    }
+
+    @Test fun `F5 fulfillment requires verified payment`() {
+        val id = orderFor(status = "diproses", payment = "menunggu_verifikasi")
+
+        val conflict = assertThrows(ApiException::class.java) {
+            lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("siap_diambil"))
+        }
+        assertEquals(org.springframework.http.HttpStatus.CONFLICT, conflict.status)
+        assertEquals("diproses", orderStatus(id))
+        assertEquals("active", reservationStatus(id))
+    }
+
+    @Test fun `F5 failed fulfillment requires note and releases stock`() {
+        val id = orderFor(status = "diproses", payment = "terverifikasi")
+
+        val missingNote = assertThrows(ApiException::class.java) {
+            lifecycle.updateFulfillment(farmer, id, FulfillmentUpdateRequest("gagal_dipenuhi"))
+        }
+        assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, missingNote.status)
+        assertEquals("diproses", orderStatus(id))
+
+        val view = lifecycle.updateFulfillment(
+            farmer, id, FulfillmentUpdateRequest("gagal_dipenuhi", "Panen gagal")
+        )
+        assertEquals("gagal_dipenuhi", view.orderStatus)
+        assertEquals("released", reservationStatus(id))
+        assertEquals(BigDecimal("0.00"), reserved())
+        assertEquals(BigDecimal("10.00"), stockPhysical())
+    }
+
+    @Test fun `F5 order lists and details enforce ownership and pagination`() {
+        val first = orderFor()
+        val second = orderFor(owner = otherBuyer)
+
+        val buyerPage = lifecycle.listForBuyer(buyer, 0, 20)
+        assertEquals(1, buyerPage.items.size)
+        assertEquals(first, buyerPage.items.single().orderId)
+        assertTrue(buyerPage.items.single().history.isEmpty())
+
+        val farmerPage = lifecycle.listForFarmer(farmer, 0, 20)
+        assertEquals(2, farmerPage.items.size)
+        assertEquals(setOf(first, second), farmerPage.items.map { it.orderId }.toSet())
+        assertEquals("Toko $farmer", lifecycle.detailForFarmer(farmer, first).storeName)
+
+        assertThrows(ApiException::class.java) { lifecycle.detailForBuyer(otherBuyer, first) }
+        assertThrows(ApiException::class.java) { lifecycle.detailForFarmer(otherFarmer, first) }
+        assertThrows(ApiException::class.java) { lifecycle.listForFarmer(buyer, 0, 20) }
+        assertThrows(ApiException::class.java) { lifecycle.listForBuyer(buyer, 0, 0) }
+        assertThrows(ApiException::class.java) { lifecycle.listForBuyer(buyer, 0, 101) }
+    }
+
+    @Test fun `F5 HTTP endpoints enforce role and return order data`() {
+        val id = orderFor()
+
+        mvc.perform(get("/api/v1/buyer/orders").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.data.items[0].orderId").value(id.toString()))
+            .andExpect(jsonPath("$.data.items[0].history").isEmpty)
+
+        mvc.perform(get("/api/v1/petani/orders").with(jwt().jwt { it.subject(farmer.toString()) }))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.data.items[0].orderId").value(id.toString()))
+
+        mvc.perform(get("/api/v1/buyer/orders").with(jwt().jwt { it.subject(farmer.toString()) }))
+            .andExpect(status().isForbidden)
+
+        mvc.perform(get("/api/v1/buyer/orders/$id").with(jwt().jwt { it.subject(otherBuyer.toString()) }))
+            .andExpect(status().isForbidden)
+
+        mvc.perform(put("/api/v1/petani/orders/$id/respond").with(jwt().jwt { it.subject(farmer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content("""{"decision":"terima"}"""))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.data.orderStatus").value("menunggu_pembayaran"))
+
+        mvc.perform(post("/api/v1/buyer/orders/$id/cancel").with(jwt().jwt { it.subject(buyer.toString()) }))
+            .andExpect(status().isConflict)
+
+        mvc.perform(post("/api/v1/buyer/orders/$id/cancel").with(jwt().jwt { it.subject(buyer.toString()) })
+            .contentType(MediaType.APPLICATION_JSON).content("""{"reason":"batal"}"""))
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.message").exists())
     }
 }

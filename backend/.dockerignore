@@ -1,0 +1,8 @@
+.env
+.env.*
+.gradle
+.kotlin
+.idea
+build
+local.properties
+*.log

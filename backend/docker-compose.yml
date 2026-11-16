@@ -14,5 +14,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  product-photos:
+    profiles: ["product-photos"]
+    image: panenku-product-minio:9e49d5e
+    build:
+      context: .
+      dockerfile: docker/product-photos/Dockerfile
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-panenku-local}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-panenku-local-storage-change-me}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - panenku_product_photos:/data
 volumes:
   panenku_pg:
+  panenku_product_photos:

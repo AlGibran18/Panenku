@@ -15,6 +15,7 @@ import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 @Service
@@ -34,8 +35,9 @@ class CheckoutService(
         val normalized = request.copy(items = request.items.sortedBy { it.productId }.map { it.copy(quantityKg = CheckoutMath.kg(it.quantityKg)) })
         if ((request.buyerNotes?.length ?: 0) > 1000 || (request.deliveryAddress?.length ?: 0) > 2000 || (request.deliveryDistrict?.length ?: 0) > 100 || request.scheduledTimeSlot.length > 100) invalid("Teks request terlalu panjang.")
         val hash = MessageDigest.getInstance("SHA-256").digest(mapper.writeValueAsBytes(normalized)).joinToString("") { "%02x".format(it) }
-        // Serialize same-buyer retries/cart edits. All stock-changing operations lock farmer then products.
-        actors.require(actor, "pembeli")
+        // Lock baris pembeli sebelum cek idempotency agar retry bersamaan dengan key yang sama
+        // benar-benar serial: request kedua menunggu commit pertama lalu membaca order yang sudah ada.
+        actors.requireLocked(actor, "pembeli")
         orders.findByBuyerIdAndIdempotencyKey(actor, key)?.let {
             if (it.requestHash != hash) conflict("Idempotency-Key sudah digunakan untuk request berbeda.")
             return dto(it)
@@ -72,7 +74,8 @@ class CheckoutService(
         val limit = settings.lockByKey("transaction_limit")?.value?.toLongOrNull()?.takeIf { it > 0 } ?: conflict("Limit transaksi belum dikonfigurasi dengan benar.")
         val subtotals = locked.mapIndexed { index, p -> CheckoutMath.item(normalized.items[index].quantityKg, p.pricePerKg) }
         val total = CheckoutMath.total(subtotals, fee, limit)
-        val now = Instant.now(clock)
+        // PostgreSQL TIMESTAMPTZ stores microseconds; keep first response identical to later replays.
+        val now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS)
         val order = orders.saveAndFlush(Order(buyerId = actor, farmerId = farmerId, fulfillmentMethod = request.fulfillmentMethod,
             deliveryFee = fee, subtotalItems = total - fee, totalPayment = total, transactionLimitApplied = limit,
             scheduledDate = request.scheduledDate, scheduledTimeSlot = request.scheduledTimeSlot,
