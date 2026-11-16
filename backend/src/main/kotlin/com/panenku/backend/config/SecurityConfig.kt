@@ -58,7 +58,7 @@ class SecurityConfig {
         return http.csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .authorizeHttpRequests {
-                it.requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login").permitAll()
+                it.requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/sessions", "/api/v1/auth/refresh", "/api/v1/auth/logout").permitAll()
                     .requestMatchers(HttpMethod.GET, "/api/v1/buyer/products", "/api/v1/buyer/products/*", "/api/v1/buyer/commodities").permitAll()
                     .anyRequest().authenticated()
             }

@@ -1,10 +1,8 @@
 package com.panenku.backend.modules.shared.service
 
 import com.panenku.backend.common.exception.*
-import org.springframework.stereotype.Service
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.time.*
 
 object CheckoutMath {
     private val maxKg = BigDecimal("99999999.99")
@@ -25,17 +23,4 @@ object CheckoutMath {
         return exact(total)
     }
     private fun exact(value: BigDecimal): Long = try { value.longValueExact() } catch (_: ArithmeticException) { invalid("Nominal terlalu besar.") }
-}
-
-@Service
-class SchedulingService(private val clock: Clock) {
-    fun validate(date: LocalDate, slot: String, readyDates: List<LocalDate>, allowedSlots: List<String>) {
-        val now = ZonedDateTime.now(clock.withZone(ZoneId.of("Asia/Jakarta")))
-        if (readyDates.isEmpty() || date < now.toLocalDate() || readyDates.any { date < it }) invalid("Jadwal sebelum tanggal tersedia atau tanggal hari ini.")
-        if (slot !in allowedSlots || !Regex("""\d{2}:\d{2}-\d{2}:\d{2}""").matches(slot)) invalid("Slot waktu tidak tersedia.")
-        val parts = slot.split('-')
-        val start = try { LocalTime.parse(parts[0]) } catch (_: Exception) { invalid("Slot waktu tidak valid.") }
-        val end = try { LocalTime.parse(parts[1]) } catch (_: Exception) { invalid("Slot waktu tidak valid.") }
-        if (start >= end || (date == now.toLocalDate() && start <= now.toLocalTime())) invalid("Slot waktu sudah lewat atau tidak valid.")
-    }
 }

@@ -16,7 +16,18 @@ interface FarmerProfileRepository : JpaRepository<FarmerProfile, UUID> {
     fun lockById(@Param("id") id: UUID): FarmerProfile?
 }
 interface PaymentMethodRepository : JpaRepository<FarmerPaymentMethod, UUID> {
-    fun findAllByFarmerId(farmerId: UUID): List<FarmerPaymentMethod>
+    @Query("select p from FarmerPaymentMethod p where p.farmerId = :farmerId and p.isActive = true")
+    fun findAllByFarmerId(@Param("farmerId") farmerId: UUID): List<FarmerPaymentMethod>
+    @Query("select p.id from FarmerPaymentMethod p where p.farmerId = :farmerId and p.isActive = true order by p.id")
+    fun idsByFarmerId(@Param("farmerId") farmerId: UUID): List<UUID>
+    @Query("select p.farmerId from FarmerPaymentMethod p where p.id = :id")
+    fun findFarmerId(@Param("id") id: UUID): UUID?
+    @Lock(LockModeType.PESSIMISTIC_READ)
+    @Query("select p from FarmerPaymentMethod p where p.id = :id")
+    fun lockById(@Param("id") id: UUID): FarmerPaymentMethod?
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select p from FarmerPaymentMethod p where p.id = :id")
+    fun lockForUpdate(@Param("id") id: UUID): FarmerPaymentMethod?
 }
 interface SettingRepository : JpaRepository<Setting, String> {
     @Lock(LockModeType.PESSIMISTIC_READ)
@@ -36,6 +47,7 @@ interface ProductReference {
 }
 
 interface ProductRepository : JpaRepository<Product, UUID> {
+    fun existsByFarmerIdAndPublicationStatus(farmerId: UUID, publicationStatus: String): Boolean
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from Product p where p.id = :id")
     fun lockById(@Param("id") id: UUID): Product?

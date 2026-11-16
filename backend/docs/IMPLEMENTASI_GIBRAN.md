@@ -1,5 +1,7 @@
 # Implementasi awal bagian Gibran
 
+> **Catatan 17 November 2026:** dokumen ini mencatat tahap awal. Perubahan terbaru katalog/foto produk dan keranjang/reorder dijelaskan di `F1_IMPLEMENTATION.md` dan `F2_IMPLEMENTATION.md`.
+
 Kode ini mulai mengimplementasikan pembagian backend terbaru: F1 katalog/produk, F2 keranjang dan reservasi stok, F3 jadwal, F4 kalkulasi checkout. Laporan awal membagi Gibran pada F2/F4; pembagian backend terbaru memperluasnya ke F1/F3. Dokumen tugas dipakai sebagai kebutuhan produk, bukan perintah menjalankan tindakan eksternal.
 
 ## Yang sudah ada
@@ -117,6 +119,8 @@ Content-Type: application/json
 ```
 
 Perubahan dari contoh README lama: header `Idempotency-Key`, `items[].expectedPricePerKg`, `expectedDeliveryFee`, dan `deliveryDistrict` diperlukan. Kecamatan dikirim sebagai identifier terstruktur, tidak ditebak dari alamat bebas. Field expected membuktikan harga/ongkir yang dilihat klien; backend selalu menghitung nilai sebenarnya dari database. Harga/ongkir berbeda menghasilkan 409: muat ulang data, minta pembeli menyetujui, lalu kirim request baru dengan key baru. Field tambahan tak dikenal ditolak agar salah nama field tidak diabaikan diam-diam.
+
+Setelah petani menerima pesanan, pembeli memilih metode dari salinan yang dibuat saat checkout melalui `GET /api/v1/buyer/orders/{orderId}/payment-options` dan `PUT /api/v1/buyer/orders/{orderId}/payment-destination`. Field pilihan metode tidak dikirim pada checkout baru. Petani dapat mengunggah QRIS melalui `POST /api/v1/petani/payment-methods/qris` menggunakan penyimpanan lokal privat. Lihat README untuk batasan serta pesanan lama.
 
 Simpan key pada upaya checkout di Android. Retry akibat timeout memakai **key dan payload yang sama**. Jika pengguna mengubah item/jadwal/harga yang disetujui, gunakan key baru. Jangan membuat UUID baru pada setiap retry jaringan. Key berlaku dalam lingkup pembeli dan tersimpan bersama order, sehingga bertahan setelah restart server. Respons replay memakai snapshot dan status order yang tersimpan, tanpa membuat reservasi baru.
 

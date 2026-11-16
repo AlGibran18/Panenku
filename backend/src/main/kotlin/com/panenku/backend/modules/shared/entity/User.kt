@@ -24,6 +24,8 @@ class User {
     @Column(nullable = false)
     var status: String = "active" // active, suspended
 
+    var displayName: String? = null
+
     @Column(name = "created_at")
     var createdAt: Instant = Instant.now()
 

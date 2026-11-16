@@ -177,7 +177,7 @@ Backend harus mengimplementasi aturan berikut:
 
 ## 🗄️ Skema Database Lengkap
 
-> **Catatan:** skema di bawah adalah **desain target MVP**. Skema yang benar-benar dijalankan saat ini ada di `src/main/resources/db/migration/V1–V4`. Perbedaan antara desain dan implementasi dicatat di bagian **Status Implementasi & Deviasi**.
+> **Catatan:** skema di bawah adalah **desain target MVP**. Skema yang benar-benar dijalankan saat ini ada di `src/main/resources/db/migration/V1–V21`. Perbedaan antara desain dan implementasi dicatat di bagian **Status Implementasi & Deviasi**.
 
 ### Konsep Umum
 
@@ -1051,7 +1051,7 @@ Semua endpoint menggunakan prefix `/api/v1`. Autentikasi menggunakan header `Aut
 | POST | `/buyer/orders/{id}/review` | Tulis ulasan (hanya setelah selesai, 1 per pesanan) | Pembeli |
 | POST | `/buyer/refunds` | Ajukan refund (maksimal 1 aktif per pesanan) | Pembeli |
 | GET | `/buyer/refunds` | Daftar refund sendiri | Pembeli |
-| POST | `/buyer/escalations` | Buat tiket eskalasi ke admin | Pembeli |
+| POST | `/buyer/refunds/{id}/escalations` | Eskalasi refund ke admin | Pembeli |
 | GET | `/buyer/notifications` | Daftar notifikasi dalam aplikasi | Pembeli |
 | PUT | `/buyer/notifications/{id}/read` | Tandai notifikasi dibaca | Pembeli |
 
@@ -1078,7 +1078,8 @@ Semua endpoint menggunakan prefix `/api/v1`. Autentikasi menggunakan header `Aut
 | PUT | `/petani/orders/{id}/payment-verify` | Verifikasi bukti pembayaran (terima/tolak) | Petani |
 | PUT | `/petani/orders/{id}/fulfillment` | Update status pemenuhan (siap diambil/diantar/gagal) | Petani |
 | GET | `/petani/refunds` | Daftar refund terkait toko sendiri | Petani |
-| PUT | `/petani/refunds/{id}/respond` | Setuju/tolak refund, upload bukti transfer balik | Petani |
+| PUT | `/petani/refunds/{id}/respond` | Setuju/tolak refund | Petani |
+| POST | `/petani/refunds/{id}/transfer-proof` | Upload bukti transfer balik | Petani |
 
 ### 4. Admin
 
@@ -1133,7 +1134,7 @@ Content-Type: application/json
 }
 ```
 
-> **Status implementasi:** respons login saat ini baru mengembalikan **access token** berupa string pada field `data`. Refresh token, logout, dan refresh endpoint masih direncanakan (lihat **Status Implementasi & Deviasi**).
+> **Status implementasi:** `POST /auth/login` tetap mengembalikan access token berupa string untuk kompatibilitas. Gunakan `POST /auth/sessions` untuk sesi baru yang mendukung refresh dan logout (lihat **Status Implementasi & Deviasi**).
 
 ### Checkout (Pembeli)
 
@@ -1141,19 +1142,23 @@ Content-Type: application/json
 ```http
 POST /api/v1/buyer/checkout
 Authorization: Bearer <access_token>
+Idempotency-Key: checkout-contoh-1
 Content-Type: application/json
 
 {
   "items": [
     {
       "productId": "550e8400-e29b-41d4-a716-446655440001",
-      "quantityKg": 2.5
+      "quantityKg": 2.5,
+      "expectedPricePerKg": 16000
     }
   ],
   "fulfillmentMethod": "delivery",
   "scheduledDate": "2026-11-15",
   "scheduledTimeSlot": "08:00-10:00",
+  "expectedDeliveryFee": 10000,
   "deliveryAddress": "Jl. Merdeka No. 1, Kec. Kepanjen",
+  "deliveryDistrict": "kepanjen",
   "buyerNotes": "Tolong dikirim pagi-pagi"
 }
 ```
@@ -1176,7 +1181,7 @@ Content-Type: application/json
 }
 ```
 
-> **Status implementasi:** selain field di atas, checkout saat ini juga mewajibkan `expectedPricePerKg` per item, `expectedDeliveryFee`, `scheduledTimeSlot`, dan `deliveryDistrict` (untuk pengantaran) sebagai konfirmasi harga/ongkir/jadwal.
+> **Status implementasi:** metode pembayaran dipilih setelah petani menerima pesanan. Contoh tanggal dan ID harus disesuaikan dengan data aktual. Respons di atas disingkat.
 
 ### Verifikasi Bukti Pembayaran (Petani)
 
@@ -1187,6 +1192,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 
 {
+  "submissionId": "550e8400-e29b-41d4-a716-446655440004",
   "decision": "terima",
   "reason": "Dana telah diterima melalui transfer bank"
 }
@@ -1197,14 +1203,17 @@ Content-Type: application/json
 {
   "success": true,
   "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440004",
     "orderId": "550e8400-e29b-41d4-a716-446655440002",
-    "paymentStatus": "terverifikasi",
-    "orderStatus": "diproses"
+    "status": "terverifikasi",
+    "expectedAmount": 50000
   },
-  "message": "Bukti pembayaran diverifikasi. Pesanan diproses.",
+  "message": "Berhasil",
   "timestamp": "2026-11-10T11:00:00Z"
 }
 ```
+
+> Respons di atas disingkat. `submissionId` wajib untuk memastikan keputusan hanya berlaku pada bukti yang diperiksa, termasuk ketika pembeli mengunggah ulang setelah penolakan.
 
 ### Ajukan Refund (Pembeli)
 
@@ -1212,18 +1221,16 @@ Content-Type: application/json
 ```http
 POST /api/v1/buyer/refunds
 Authorization: Bearer <access_token>
-Content-Type: application/json
+Idempotency-Key: refund-contoh-1
+Content-Type: multipart/form-data
 
-{
-  "orderId": "550e8400-e29b-41d4-a716-446655440002",
-  "reason": "Barang tidak sesuai yang dipesan",
-  "evidencePhotoPath": "refunds/evidence/uuid-123.jpg",
-  "refundAmount": 50000,
-  "destinationType": "bank",
-  "destinationProvider": "BRI",
-  "destinationAccount": "1234567890",
-  "destinationName": "Pembeli Contoh"
-}
+orderId: 550e8400-e29b-41d4-a716-446655440002
+reason: Barang tidak sesuai yang dipesan
+destinationType: bank
+destinationProvider: Bank Contoh
+destinationAccount: 0012345678
+destinationName: Pembeli Contoh
+image: <file JPEG/PNG bukti kondisi>
 ```
 
 **Response (201 Created):**
@@ -1231,16 +1238,18 @@ Content-Type: application/json
 {
   "success": true,
   "data": {
-    "refundId": "550e8400-e29b-41d4-a716-446655440003",
+    "id": "550e8400-e29b-41d4-a716-446655440003",
     "orderId": "550e8400-e29b-41d4-a716-446655440002",
     "status": "diajukan",
     "refundAmount": 50000,
     "createdAt": "2026-11-10T12:00:00Z"
   },
-  "message": "Pengajuan refund berhasil dibuat. Tunggu respons petani.",
+  "message": "Berhasil",
   "timestamp": "2026-11-10T12:00:00Z"
 }
 ```
+
+> Respons disingkat. Nominal berasal dari total pesanan dan mencakup ongkir; klien tidak menentukan jumlahnya.
 
 ### Kode Status Respons Umum
 
@@ -1262,7 +1271,7 @@ Content-Type: application/json
 
 - Password di-hash dengan **bcrypt** atau **argon2** (minimal 8 karakter).
 - JWT Access Token (short-lived) + Refresh Token (long-lived).
-  > Status saat ini: baru access token yang diimplementasikan; refresh token masih direncanakan.
+  > Status saat ini: sesi baru tersedia lewat `/auth/sessions`; `/auth/login` lama tetap mengembalikan access token saja.
 - Semua endpoint mutatif memvalidasi: **aktor, status sebelumnya, dan kepemilikan data**. Role dicek ulang ke database lewat `ActorService`, bukan hanya dari klaim token.
 - File upload maksimal 5 MB (JPEG/PNG), disimpan privat (MinIO/S3), diakses lewat signed URL.
 - Audit log untuk setiap tindakan admin (siapa, kapan, aksi apa, target, alasan).
@@ -1286,7 +1295,7 @@ Content-Type: application/json
 
 ### Prasyarat
 - JDK 17+
-- Docker & Docker Compose (untuk PostgreSQL & MinIO)
+- Docker & Docker Compose (untuk PostgreSQL dan test integrasi)
 - Gradle
 
 ### Menjalankan dengan Docker Compose
@@ -1294,7 +1303,7 @@ Content-Type: application/json
 ```bash
 cd /Users/geisarrampan/AndroidStudioProjects/Panenku/backend
 
-# Jalankan database dan storage
+# Jalankan database PostgreSQL
 docker-compose up -d
 
 # Build dan jalankan aplikasi
@@ -1319,6 +1328,25 @@ MINIO_BUCKET=panenku-files
 SERVER_PORT=8080
 ```
 
+### Foto dummy untuk pengembangan
+
+Folder [`demo-assets/foto-dummy/`](demo-assets/foto-dummy/) berisi gambar contoh yang dapat digunakan tim saat menguji aplikasi. Skenarionya: **Asep Laris** adalah petani, **Mok** adalah pembeli, dan sawi yang diterima pembeli rusak, sobek, serta tidak segar.
+
+| File | Penggunaan |
+|------|------------|
+| [qris-asep-laris.png](demo-assets/foto-dummy/qris-asep-laris.png) | Contoh QRIS petani; hanya ilustrasi dan bukan untuk pembayaran. |
+| [bukti-pembayaran-mok.png](demo-assets/foto-dummy/bukti-pembayaran-mok.png) | Contoh bukti pembayaran pembeli kepada petani. |
+| [sawi-rusak-refund.png](demo-assets/foto-dummy/sawi-rusak-refund.png) | Contoh foto barang untuk pengajuan refund. |
+| [bukti-transfer-refund.png](demo-assets/foto-dummy/bukti-transfer-refund.png) | Contoh bukti transfer pengembalian dana dari petani kepada pembeli. |
+| [bukti-transfer-terlambat.png](demo-assets/foto-dummy/bukti-transfer-terlambat.png) | Contoh bukti untuk laporan transfer setelah pesanan kedaluwarsa. |
+| [produk-sawi-segar.png](demo-assets/foto-dummy/produk-sawi-segar.png) | Contoh gambar produk sawi untuk katalog. |
+
+Semua gambar berformat PNG dan berukuran kurang dari 5 MB. Nilai Rp25.000 pada ilustrasi bukti adalah contoh. Pilih gambar secara manual saat mencoba endpoint upload atau UI yang sudah terhubung; unggah foto produk tersedia melalui penyimpanan F1 tersendiri; lihat `docs/F1_IMPLEMENTATION.md`.
+
+**Gambar ini belum membuat akun, produk, pesanan, atau data refund secara otomatis.** Backend menyimpan file upload privat menggunakan nama acak yang dicatat di database, sehingga menyalin gambar ke folder saja tidak membuatnya muncul di aplikasi. Setelah gambar di-commit dan di-push, anggota tim dapat memperolehnya dengan `git pull`; unggahan baru tetap tersimpan di perangkat masing-masing dan tidak tersinkron otomatis.
+
+Gunakan gambar dummy saja untuk dibagikan melalui Git. Foto QRIS asli, bukti transaksi dan data pengguna harus tetap di penyimpanan privat, bukan di folder contoh atau repository.
+
 ---
 
 ## 📦 Tahapan Implementasi (berdasarkan Laporan Praktikum)
@@ -1335,42 +1363,187 @@ SERVER_PORT=8080
 
 ## 🧭 Status Implementasi & Deviasi
 
-Bagian ini memisahkan **desain target** (isi README di atas) dari **kondisi kode saat ini**. Sumber kebenaran skema yang sudah berjalan adalah `src/main/resources/db/migration/V1–V4`, bukan tabel desain di atas.
+Bagian ini memisahkan **desain target** (isi README di atas) dari **kondisi kode saat ini**. Sumber kebenaran skema adalah `src/main/resources/db/migration/V1–V21`, bukan tabel desain di atas.
+
+> **Integrasi 17 November 2026:** V5 adalah migrasi `reviews` dari F1; migrasi pembayaran sampai profil yang sebelumnya hanya ada di workspace Rampan dinomori ulang menjadi V6–V21. Database lokal yang telanjur menjalankan migrasi lama V5–V20 tidak otomatis kompatibel. Jangan menjalankan `flyway repair`, menghapus data, atau reset database secara membabi buta; periksa dan cadangkan database lalu tentukan migrasi yang tepat bersama tim. Pengujian integrasi menggunakan database PostgreSQL sementara.
 
 ### Endpoint yang sudah tersedia
 
 | Modul | Endpoint |
 |-------|----------|
 | Auth | `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `GET /api/v1/auth/me` |
+| Auth & profil | `POST /api/v1/auth/sessions`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `GET/PUT /api/v1/auth/profile`, `GET/PUT /api/v1/petani/profile` |
 | Pembeli | `GET /api/v1/buyer/products`, `GET /api/v1/buyer/products/{id}`, `GET /api/v1/buyer/commodities` |
 | Pembeli | `GET/POST/PUT/DELETE /api/v1/buyer/cart...`, `POST /api/v1/buyer/checkout` |
+| Pembeli (pilihan pembayaran) | `GET /api/v1/buyer/orders/{orderId}/payment-options`, `GET /api/v1/buyer/orders/{orderId}/payment-options/{methodId}/qris`, `PUT/GET /api/v1/buyer/orders/{orderId}/payment-destination`, `GET /api/v1/buyer/orders/{orderId}/payment-destination/qris` |
+| Pembeli (F6) | `POST /api/v1/buyer/orders/{orderId}/payment-proof`, `GET /api/v1/buyer/orders/{orderId}/payment-proofs`, `GET /api/v1/buyer/orders/{orderId}/payment-proofs/{submissionId}/image` |
+| Pembeli (F7) | `POST/GET /api/v1/buyer/refunds`, `GET /api/v1/buyer/refunds/{id}`, `GET /api/v1/buyer/refunds/{id}/evidence`, `GET /api/v1/buyer/refunds/{id}/transfer-proof`, `POST /api/v1/buyer/refunds/{id}/confirm`, `POST /api/v1/buyer/refunds/{id}/escalations`, `GET /api/v1/buyer/escalations/{id}` |
+| Pembeli (laporan transfer terlambat) | `POST/GET /api/v1/buyer/late-payment-reports`, `GET /api/v1/buyer/late-payment-reports/{id}`, `GET /api/v1/buyer/late-payment-reports/{id}/evidence` |
 | Pembeli (F5) | `GET /api/v1/buyer/orders`, `GET /api/v1/buyer/orders/{id}`, `POST /api/v1/buyer/orders/{id}/cancel`, `POST /api/v1/buyer/orders/{id}/receive` |
 | Petani | `GET/POST/PUT/DELETE /api/v1/petani/products...` |
+| Petani (QRIS) | `POST /api/v1/petani/payment-methods/qris`, `GET /api/v1/petani/payment-methods`, `GET/PUT/DELETE /api/v1/petani/payment-methods/{id}/qris` |
+| Petani (rekening bank) | `POST /api/v1/petani/payment-methods/bank`, `GET/PUT/DELETE /api/v1/petani/payment-methods/{id}/bank` |
+| Petani (F6) | `PUT /api/v1/petani/orders/{orderId}/payment-verify`, `GET /api/v1/petani/orders/{orderId}/payment-proofs`, `GET /api/v1/petani/orders/{orderId}/payment-proofs/{submissionId}/image`, `GET /api/v1/petani/orders/{orderId}/payment-destination` |
+| KTP dummy (pengembangan) | `POST /api/v1/petani/ktp/application`, `GET /api/v1/petani/ktp/status`, `GET /api/v1/petani/ktp/document`, `GET /api/v1/admin/farmers/{id}/verification`, `GET /api/v1/admin/farmers/{id}/ktp-document` |
+| Petani (F7) | `GET /api/v1/petani/refunds`, `GET /api/v1/petani/refunds/{id}`, `GET /api/v1/petani/refunds/{id}/evidence`, `GET /api/v1/petani/refunds/{id}/transfer-proof`, `PUT /api/v1/petani/refunds/{id}/respond`, `POST /api/v1/petani/refunds/{id}/transfer-proof` |
 | Petani (F5) | `GET /api/v1/petani/orders`, `GET /api/v1/petani/orders/{id}`, `PUT /api/v1/petani/orders/{id}/respond`, `PUT /api/v1/petani/orders/{id}/fulfillment` |
 | Admin | `GET/POST/PUT /api/v1/admin/commodities...` |
 | Admin | `PUT /api/v1/admin/farmers/{id}/verify`, `PUT /api/v1/admin/users/{id}/suspend` |
+| Admin (pengelolaan) | `GET /api/v1/admin/farmers/verification-queue`, `GET /api/v1/admin/users`, `GET /api/v1/admin/users/{id}`, `GET/PUT /api/v1/admin/settings`, `PUT /api/v1/admin/settings/transaction-limit`, `GET /api/v1/admin/audit-logs` |
+| Bantuan | `GET /api/v1/support/contact` — nomor WhatsApp CS untuk akun yang telah login |
+| Admin (F6) | `GET /api/v1/admin/orders/{orderId}/payment-proofs`, `GET /api/v1/admin/orders/{orderId}/payment-proofs/{submissionId}/image` |
+| Admin (F7) | `GET /api/v1/admin/refunds`, `GET /api/v1/admin/refunds/{id}`, `GET /api/v1/admin/refunds/{id}/evidence`, `GET /api/v1/admin/refunds/{id}/transfer-proof`, `GET /api/v1/admin/disputes`, `GET /api/v1/admin/disputes/{id}`, `PUT /api/v1/admin/disputes/{id}/decide` |
+| Admin (laporan transfer terlambat) | `GET /api/v1/admin/late-payment-reports`, `GET /api/v1/admin/late-payment-reports/{id}`, `GET /api/v1/admin/late-payment-reports/{id}/evidence`, `PUT /api/v1/admin/late-payment-reports/{id}/review`, `PUT /api/v1/admin/late-payment-reports/{id}/close` |
 
-Sisanya (bukti pembayaran, verifikasi pembayaran, review, refund, eskalasi, notifikasi, payment method petani, profil petani, settings limit, audit-log list, dispute admin) masih **direncanakan**.
+Sisanya (review, notifikasi, KTP asli dan integrasi UI) masih **direncanakan**.
 
-> **Catatan F5:** transisi status mengikuti state machine di README. Pembatalan/penolakan/`gagal_dipenuhi` melepas reservasi stok; transisi ke `menunggu_penerimaan` memenuhi reservasi (mengurangi `stock_reserved` dan `stock_physical`). Perubahan status pemenuhan mensyaratkan `payment_status = 'terverifikasi'`, yang baru bisa dipenuhi setelah endpoint F6 tersedia.
+#### Antrean KTP, pengguna, pengaturan dan audit admin
+
+Endpoint di bawah memerlukan token **admin aktif**, memeriksa status akun pada database, dan responsnya memakai `Cache-Control: no-store`. Daftar menggunakan `page` mulai dari 0 dan `size` 1–100 (default 20), dengan respons `data.items`, `page`, `size`, dan `totalElements`.
+
+| Endpoint | Kegunaan |
+|---|---|
+| `GET /api/v1/admin/farmers/verification-queue` | Daftar pengajuan dengan filter `status=menunggu\|disetujui\|ditolak` (default menunggu) dan pencarian toko/email/UUID. `hasDocument` menyatakan ada path, bukan memastikan file tersedia. |
+| `GET /api/v1/admin/users` | Daftar pengguna; filter opsional `role=admin\|petani\|pembeli`, `status=active\|suspended`, dan `search` untuk email atau nama. Hash password tidak dikirim. |
+| `GET /api/v1/admin/users/{id}` | Detail akun, nama tampilan, nama pemilik/toko/lokasi dan status KTP bila ada; alasan suspend saat ini jika tercatat; jumlah refund aktif dan hingga lima refund aktif terbaru. Hanya admin aktif. |
+| `PUT /api/v1/admin/users/{id}/suspend` | Body `{"suspend":true,"reason":"Alasan suspend"}` untuk suspend; alasan wajib, maksimal 1000 karakter. Untuk pemulihan kirim `{"suspend":false,"reason":"Catatan pemulihan"}`; catatan opsional. Perubahan dicatat di audit. |
+| `GET /api/v1/admin/settings` | Membaca `transactionLimit` dan `csWhatsapp`; `csWhatsapp` bernilai null jika belum dikonfigurasi. |
+| `PUT /api/v1/admin/settings` | Menyimpan limit dan nomor WhatsApp CS bersama dalam satu transaksi untuk tombol simpan pada layar pengaturan admin. |
+| `PUT /api/v1/admin/settings/transaction-limit` | Mengubah limit checkout, dengan body `{"newLimit":8000000,"reason":"Alasan perubahan"}`. Limit wajib bilangan bulat rupiah positif dan alasan wajib diisi maksimal 1000 karakter. |
+| `GET /api/v1/admin/audit-logs` | Melihat riwayat tindakan; filter opsional `action`, misalnya `TRANSACTION_LIMIT_CHANGED`. |
+
+Perubahan limit dan auditnya disimpan dalam transaksi yang sama. Mengirim nilai yang sudah aktif tidak membuat catatan perubahan baru. Limit baru berlaku untuk checkout berikutnya; pesanan yang sudah dibuat menyimpan limit awal. Verifikasi KTP hanya menerima pengajuan berstatus `menunggu`; keputusan untuk pengajuan yang sudah diproses ditolak dengan 409. API pengajuan dan gambar saat ini hanya untuk **KTP dummy pengembangan** dan harus diaktifkan secara eksplisit.
+
+Respons pengaturan menyertakan `settingsVersion`, `lastChangedBy`, `lastChangedByEmail`, `lastChangedByName`, dan `lastChangedAt`. Versi dimulai dari 1 pada migrasi V17 dan bertambah sekali per penyimpanan yang benar-benar mengubah pengaturan; riwayat lebih lama tidak dapat diberi versi secara retroaktif. Audit menyertakan `actorName`, `actorEmail`, dan `settingsVersion` jika tersedia. Nama admin mencerminkan profil saat ini dan dapat kosong untuk akun lama; nama historis tidak disimpan. Penambahan/perubahan komoditas juga menghasilkan catatan audit.
+
+Untuk pengelolaan akun, nama pemilik petani tersedia sebagai `ownerName` setelah diisi pada profil; akun lama dapat bernilai null. Nama tampilan petani tetap nama toko. Daftar refund aktif pada detail hanya menampilkan lima terbaru; `activeRefundCount` adalah jumlah keseluruhannya. Permintaan suspend/pulihkan yang mengulang status saat ini tidak membuat audit baru. Riwayat suspend lama mungkin tidak memiliki alasan jika dicatat sebelum aturan ini diterapkan. Suspend tidak otomatis menyelesaikan refund yang sedang berjalan.
+
+#### Menyimpan WhatsApp CS dan limit dari layar admin
+
+1. Admin membaca `GET /api/v1/admin/settings`. Simpan nilai `transactionLimit` dan `csWhatsapp` yang diterima sebagai nilai awal form.
+2. Admin mengisi nomor dan limit lalu menyimpan melalui `PUT /api/v1/admin/settings` dengan token admin. Contoh nomor di bawah hanya dummy, bukan kontak CS sungguhan:
+
+```json
+{
+  "newLimit": 8000000,
+  "csWhatsapp": "+62 800 0000 0000",
+  "expectedTransactionLimit": 10000000,
+  "expectedCsWhatsapp": null,
+  "reason": "Penyesuaian batas transaksi"
+}
+```
+
+Nomor wajib memakai `+` dan kode negara, serta 8–15 digit termasuk kode negara; spasi diperbolehkan dan dihapus saat disimpan. Backend memeriksa format, bukan memastikan nomor itu benar-benar terdaftar di WhatsApp. Alasan wajib jika nilai limit berubah, maksimal 1000 karakter; untuk perubahan nomor saja alasan boleh kosong. Nilai `expectedTransactionLimit` dan `expectedCsWhatsapp` harus sesuai nilai awal yang dibaca melalui GET; gunakan `null` jika nomor belum disetel. Jika admin lain mengubah pengaturan, respons 409 meminta UI memuat ulang sebelum menyimpan. Retry dengan hasil akhir yang sama tidak membuat audit ganda. Limit dan nomor disimpan bersama, sementara perubahan masing-masing dicatat sebagai `TRANSACTION_LIMIT_CHANGED` dan `CS_WHATSAPP_CHANGED`. Endpoint limit lama tetap tersedia.
+
+Pembeli, petani, dan admin yang login dapat membaca `GET /api/v1/support/contact`; akun tersuspend tetap dapat mengakses nomor CS untuk bantuan. Nomor bernilai `null` sebelum admin mengaturnya. Backend tidak mengirim pesan atau membuka WhatsApp secara otomatis. Nomor CS nyata harus ditentukan dan dimasukkan oleh admin; gambar dan nomor dalam contoh hanya untuk demo.
+
+#### Sesi login dan profil
+
+`POST /api/v1/auth/sessions` menerima JSON email/password yang sama seperti login dan mengembalikan `accessToken`, `refreshToken`, `refreshExpiresAt`, dan `user`. `POST /auth/refresh` menerima `{"refreshToken":"..."}` dan mengembalikan token baru; refresh token lama tidak dapat dipakai ulang. Masa berlaku refresh tetap 30 hari sejak sesi dibuat. `POST /auth/logout` dengan body yang sama mencabut refresh token saat ini dan mengembalikan 204; access token yang sudah terbit tetap berlaku sampai kedaluwarsa. Simpan refresh token di penyimpanan aman perangkat, bukan di log. `/auth/login` lama tidak berubah, tetapi tidak menghasilkan refresh token; tim Android perlu memakai `/auth/sessions` untuk alur baru. Refresh dan logout tidak memerlukan access token agar tetap dapat dipakai setelah access token kedaluwarsa.
+
+`GET/PUT /auth/profile` membaca/mengubah nama, nomor telepon opsional, dan alamat pembeli opsional (`fullName`, `contactPhone`, `deliveryAddress`). Untuk petani, `fullName` adalah nama pribadi pemilik dan alamat pembeli tidak digunakan. Untuk admin, hanya `fullName` yang dapat diubah; nama ini dipakai dalam tampilan audit. `GET/PUT /petani/profile` mengelola `storeName`, `pickupLocation`, `serviceArea` sebagai array identifier kecamatan, `deliveryFee`, `shippingEnabled`, dan `timeSlots` sebagai array slot `HH:mm-HH:mm` WIB pada hari yang sama. Contoh area: `["kepanjen", "dau"]`. Field KTP dibaca, bukan diubah lewat profil. Perubahan profil tidak mengubah snapshot pesanan lama; koordinasikan bentuk data ini dengan Gibran dan Android.
+
+#### Pengajuan KTP dummy
+
+Untuk pengembangan lokal saja, set `KTP_DUMMY_ENABLED=true` dan `PAYMENT_STORAGE_LOCAL_DIR` ke folder privat POSIX, lalu jalankan ulang backend. Default-nya fitur ini nonaktif. Jangan unggah dokumen identitas sungguhan. Gambar tidak dianalisis untuk memastikan isinya benar-benar dummy; penanggung jawab lingkungan pengembangan wajib memakai data contoh.
+
+Petani mengirim `POST /api/v1/petani/ktp/application` dengan `Idempotency-Key` dan multipart `dummyName`, `dummyNik` (contoh `DUMMY-0001`) dan `image` JPEG/PNG maksimal 5 MB. `GET /petani/ktp/status` menampilkan status dan alasan penolakan; `GET /petani/ktp/document` menampilkan gambar sendiri. Setelah ditolak, petani boleh mengajukan ulang memakai key baru; saat menunggu atau disetujui, pengajuan baru ditolak. Admin aktif membaca detail `GET /admin/farmers/{farmerId}/verification`, gambar privat `/admin/farmers/{farmerId}/ktp-document`, dan memutuskan melalui endpoint verify yang sudah ada. Filter `status` dan `search` pada antrean mendukung layar admin. Pengajuan lama tanpa metadata dummy tetap dapat memiliki data yang kosong. Ini bukan alur KTP asli untuk produksi.
+
+#### Data demo lokal terpisah
+
+`scripts/seed_demo.py` hanya berjalan dengan persetujuan eksplisit `PANENKU_DEMO_CONFIRM=YES`, URL PostgreSQL lokal tanpa kredensial yang menunjuk ke database **kosong bernama `panenku_demo`**, dan migrasi Flyway sampai V21. Script memerlukan Python 3, `psql`, `htpasswd`, user/password PostgreSQL melalui environment `PGUSER`/`PGPASSWORD`, serta `PANENKU_DEMO_PASSWORD` 12–72 byte untuk tiga akun demo. Jangan gunakan sandi atau database produksi. Pertama buat database demo terpisah dan jalankan backend dengan `DB_URL=jdbc:postgresql://localhost:5432/panenku_demo` agar Flyway selesai. Set folder absolut kosong bernama `panenku-demo-storage` sebagai `PANENKU_DEMO_STORAGE_DIR` **dan** `PAYMENT_STORAGE_LOCAL_DIR` dengan izin 700. Contoh menjalankan setelah environment siap:
+
+```bash
+export PANENKU_DEMO_DATABASE_URL='postgresql://localhost:5432/panenku_demo'
+export PANENKU_DEMO_CONFIRM=YES
+python3 scripts/seed_demo.py
+```
+
+Script membuat Mok (`mok@example.test`), Asep Laris (`asep@example.test`), admin (`admin@example.test`), produk sawi, QRIS dummy, dua pesanan, bukti pembayaran, dan refund; ketiganya memakai `PANENKU_DEMO_PASSWORD`. Menjalankannya lagi tidak menimpa data. Setup pertama menolak database berisi pengguna/produk/pesanan/komoditas atau folder demo yang tidak kosong. Gambar produk tersimpan sebagai path contoh; path contoh tersebut belum menjadi object key foto F1; unggah gambar produk lewat endpoint F1 sebelum menampilkannya di UI. Data dummy bukan transaksi atau nomor pembayaran sungguhan.
+
+Checkout tidak memilih metode pembayaran. Backend menyimpan salinan semua metode yang tersedia saat checkout; setelah petani menerima pesanan, pembeli melihat salinan tersebut melalui `GET /orders/{orderId}/payment-options` dan memilih dengan `PUT /orders/{orderId}/payment-destination`, body `{"paymentMethodId":"<id>"}`. Pembeli dapat mengubah pilihan sebelum bukti pertama dikirim. Saat bukti dikirim, tujuan terpilih menjadi snapshot immutable dan tidak dapat diganti, termasuk setelah bukti ditolak. Rekening lengkap dan gambar QRIS hanya tersedia untuk pemilik setelah petani menerima pesanan. QRIS menggunakan penyimpanan lokal privat yang dikonfigurasi melalui `PAYMENT_STORAGE_LOCAL_DIR` (macOS/Linux), bukan MinIO/S3 produksi. Pesanan lama tanpa snapshot tetap tidak memiliki tujuan pembayaran otomatis. Retry checkout lama dengan key dan body lama tetap didukung; field pilihan pembayaran pada checkout baru ditolak agar klien diperbarui.
+
+#### Upload QRIS oleh petani
+
+Konfigurasi `PAYMENT_STORAGE_LOCAL_DIR` sebagai direktori privat di luar web root, lalu jalankan backend dengan environment tersebut. Endpoint hanya untuk akun petani aktif dan menggunakan `multipart/form-data`:
+
+```http
+POST /api/v1/petani/payment-methods/qris
+Authorization: Bearer <token-petani>
+Idempotency-Key: qris-pertama-1
+Content-Type: multipart/form-data
+
+accountHolderName: Nama penerima QRIS
+image: <file JPEG atau PNG, maksimal 5 MB dan 12 juta piksel>
+```
+
+Respons 201 berisi `id` metode. Retry unggahan yang sama memakai key dan isi yang sama; key yang sama dengan isi berbeda ditolak (409). Lihat metode sendiri melalui `GET /api/v1/petani/payment-methods`, dan gambar sendiri melalui `GET /api/v1/petani/payment-methods/{id}/qris`. Backend memeriksa file gambar, bukan memvalidasi bahwa isi QR tersebut benar-benar QRIS atau milik penerima. Tidak ada URL publik permanen.
+
+Untuk mengganti QRIS, kirim `PUT /api/v1/petani/payment-methods/{id}/qris` sebagai `multipart/form-data` dengan `accountHolderName` dan `image` JPEG/PNG maksimal 5 MB. ID metode tetap; perubahan hanya terlihat pada checkout baru. `DELETE /api/v1/petani/payment-methods/{id}/qris` menghapus QRIS dari daftar dan checkout baru, tetapi salinan QRIS pada pesanan lama tetap tersedia. Penghapusan ditolak (409) jika QRIS adalah metode pembayaran lengkap terakhir dan toko masih memiliki produk aktif. Aktifkan metode lain atau nonaktifkan produk terlebih dahulu. Penghapusan berulang oleh pemilik mengembalikan 204; retry unggahan lama dengan key dari QRIS yang sudah dihapus ditolak agar tidak menghidupkannya kembali. File lokal lama dibersihkan setelah transaksi berhasil; kegagalan pembersihan dicatat di log dan dapat meninggalkan file tidak terpakai.
+
+#### Rekening bank petani
+
+Akun petani aktif dapat menambahkan rekening memakai `POST /api/v1/petani/payment-methods/bank` dengan token, `Idempotency-Key`, dan JSON:
+
+```json
+{
+  "bankName": "Bank Contoh",
+  "accountNumber": "0012345678",
+  "accountHolderName": "Nama Pemilik"
+}
+```
+
+Ketiga nilai harus berupa string; `accountNumber` terdiri dari 1–50 digit sehingga angka nol di awal tetap tersimpan. Nama bank maksimal 100 karakter dan nama pemilik maksimal 255 karakter. Respons 201 berisi `id`; retry dengan key dan isi yang sama mengembalikan ID rekening yang sama, sedangkan key yang sama dengan isi berbeda menghasilkan 409. Jika rekening sudah diubah, respons retry menampilkan data rekening terkini.
+
+Gunakan `GET /api/v1/petani/payment-methods/{id}/bank` untuk mengisi form edit dan `PUT` pada URL yang sama dengan tiga field di atas untuk menyimpan perubahan. Keduanya hanya dapat diakses pemilik rekening. Daftar `GET /api/v1/petani/payment-methods` menampilkan empat digit terakhir. Backend tidak memverifikasi kepemilikan rekening ke bank. Perubahan tidak mengubah snapshot pesanan yang sudah dibuat.
+
+Untuk menghapus rekening, pemilik mengirim `DELETE /api/v1/petani/payment-methods/{id}/bank` dengan token petani. Respons berhasil 204, termasuk untuk penghapusan ulang. Rekening yang dihapus tidak lagi tampil di daftar atau checkout baru; detail dan perubahan rekening tersebut menjadi 404. Pesanan yang sudah dibuat tetap menyimpan data tujuan awal, sehingga rekening lama perlu tetap dapat menerima pembayaran untuk pesanan yang berjalan. Jika petani masih punya produk aktif, penghapusan metode pembayaran terakhir yang tersedia ditolak (409); QRIS lain dihitung tersedia hanya jika gambarnya bisa dibaca. Retry pembuatan dengan `Idempotency-Key` rekening yang sudah dihapus ditolak (409); gunakan key baru untuk menambahkan rekening kembali. Data lama dinonaktifkan, bukan dihapus fisik, untuk menjaga catatan idempotensi dan pesanan.
+
+> **Catatan F5:** transisi status mengikuti state machine di README. Pembatalan/penolakan/`gagal_dipenuhi` melepas reservasi stok; transisi ke `menunggu_penerimaan` memenuhi reservasi (mengurangi `stock_reserved` dan `stock_physical`). Perubahan status pemenuhan mensyaratkan `payment_status = 'terverifikasi'` melalui keputusan petani pada F6.
+
+#### Bukti dan verifikasi pembayaran
+
+Setelah memilih tujuan pembayaran, pembeli mengirim `multipart/form-data` ke `POST /api/v1/buyer/orders/{orderId}/payment-proof`, dengan field file `image`, header `Idempotency-Key`, dan token pembeli. File JPEG/PNG maksimal 5 MB disimpan di direktori privat `PAYMENT_STORAGE_LOCAL_DIR`. Upload mengubah status menjadi `verifikasi_pembayaran` / `menunggu_verifikasi`, bukan lunas. `expectedAmount` adalah jumlah pada pesanan, bukan bukti bahwa nominal tersebut telah masuk ke rekening.
+
+Petani melihat daftar/gambar bukti untuk pesanannya, lalu mengirim `submissionId`, `decision` (`terima` / `tolak`) dan `reason` ke endpoint `payment-verify`. Penolakan wajib beralasan, menyimpan bukti lama, dan memberi waktu baru 24 jam; penerimaan mengubah status menjadi `diproses` / `terverifikasi`. Retry upload memakai key dan gambar yang sama. Keputusan identik untuk bukti yang sama dapat diulang tanpa mengubah pesanan; keputusan berbeda ditolak. File bukti hanya tersedia untuk pembeli/petani pemilik dan admin aktif, tanpa URL publik permanen. Pesanan lama tanpa snapshot penerima tidak dapat mengunggah bukti sampai alur migrasinya disepakati.
+
+Respons bukti baru menyertakan `originalFileName` (nama file yang dibersihkan dari path/kontrol) dan `fileSizeBytes` (ukuran aktual). Bukti lama sebelum V16 dapat bernilai null karena metadata sebelumnya tidak disimpan. Retry memakai key dan isi gambar yang sama mengembalikan metadata awal. Petani pemilik dapat membaca salinan tujuan yang dipilih untuk pesanan melalui `GET /api/v1/petani/orders/{orderId}/payment-destination`; detail bukan dari rekening toko yang berubah setelah checkout.
+
+#### Refund dan sengketa F7
+
+`POST /api/v1/buyer/refunds` memakai token pembeli, header `Idempotency-Key`, dan `multipart/form-data` dengan `orderId`, `reason`, `destinationType` (`bank` atau `e-wallet`), `destinationProvider`, `destinationAccount`, `destinationName`, dan file `image` JPEG/PNG maksimal 5 MB. Nomor tujuan dikirim sebagai teks 1–100 digit. Nominal refund **dihitung backend sebagai total penuh pesanan termasuk ongkir**, bukan menerima nominal dari klien. Pembayaran harus sudah diverifikasi, pesanan sudah selesai dan belum melewati 24 jam setelah penerimaan, atau berstatus `gagal_dipenuhi`. Satu refund aktif per pesanan; refund penuh yang selesai tidak bisa diajukan ulang. Retry dengan key dan isi yang sama mengembalikan pengajuan yang sama.
+
+Petani pemilik mengirim `PUT /petani/refunds/{id}/respond` dengan JSON `{"decision":"terima"}` atau `{"decision":"tolak","reason":"..."}`. Jika disetujui, petani melakukan transfer **di luar aplikasi**, lalu mengirim `multipart/form-data` field `image` dan `Idempotency-Key` ke `POST /petani/refunds/{id}/transfer-proof`. Status menjadi `menunggu_konfirmasi_dana`, bukan otomatis selesai. Pembeli memeriksa transaksi dan menekan dana diterima melalui `POST /buyer/refunds/{id}/confirm`. Petani yang disuspend tetap dapat menyelesaikan refund dari transaksi lamanya, tetapi tidak mendapat hak transaksi baru. Refund tidak mengubah stok.
+
+Pembeli dapat mengeskalasi refund melalui `POST /buyer/refunds/{id}/escalations`, dengan header `Idempotency-Key` dan body `{"reason":"..."}`. Admin melihat daftar terbuka dan mengirim `PUT /admin/disputes/{id}/decide` dengan `{"decision":"setujui_refund","reason":"..."}` atau `{"decision":"tutup_sengketa","reason":"..."}`. Persetujuan meminta petani melanjutkan refund; apabila bukti transfer sudah ada, status kembali menunggu konfirmasi pembeli. Menutup sengketa mengembalikan refund ke status sebelum eskalasi. Kedua keputusan dicatat dalam audit log; suspend akun adalah tindakan admin terpisah. API tidak memindahkan dana dan tidak dapat membuktikan dana benar-benar masuk.
+
+Semua URL pada contoh paragraf ini menggunakan prefix `/api/v1`. Detail, riwayat, dan gambar bukti hanya tersedia untuk pembeli/petani pemilik dan admin yang berwenang. Foto saat ini menggunakan penyimpanan lokal privat pengembangan; integrasi MinIO/S3 dan uji UI Android masih belum selesai.
+
+#### Laporan transfer setelah pesanan kedaluwarsa
+
+Ini laporan terpisah dari refund biasa, untuk pembeli yang mengaku telanjur transfer sementara status pesanan sudah `kedaluwarsa` dan pembayarannya belum diverifikasi. `POST /api/v1/buyer/late-payment-reports` membutuhkan token pembeli, header `Idempotency-Key`, dan `multipart/form-data` berisi `orderId`, `reason`, `claimedAmount` (rupiah bilangan bulat positif), dan foto `image`. `claimedAmount` hanyalah nominal yang dilaporkan pembeli, bukan pembayaran yang sudah terbukti. Hanya satu laporan aktif per pesanan; bukti privat dapat dilihat pembeli pemilik dan admin.
+
+Admin meninjau melalui `PUT /api/v1/admin/late-payment-reports/{id}/review` dengan JSON `{"decision":"tindak_lanjut","reason":"..."}` atau `{"decision":"bukti_tidak_cukup","reason":"..."}`. Pilihan pertama memberi status `tindak_lanjut`, lalu admin dapat menutupnya lewat `PUT /api/v1/admin/late-payment-reports/{id}/close` dengan `{"reason":"..."}`. Pilihan bukti tidak cukup langsung menutup laporan; pembeli dapat membuat laporan baru. Pemeriksaan dan penutupan dicatat dalam audit log. Laporan **tidak mengubah pembayaran, status pesanan, stok, atau memindahkan uang**; penyelesaian dana dilakukan secara manual dan dicatat oleh admin.
 
 ### Tabel yang sudah ada migrasinya
 
-`users`, `farmer_profiles`, `buyer_profiles`, `commodities`, `products`, `farmer_payment_methods`, `settings`, `cart`, `orders`, `order_items`, `stock_reservations`, `order_status_history`, `audit_logs`.
+`users`, `farmer_profiles`, `buyer_profiles`, `commodities`, `products`, `farmer_payment_methods`, `settings`, `cart`, `orders`, `order_items`, `stock_reservations`, `order_status_history`, `audit_logs`, `order_payment_snapshots`, `order_payment_options`, `order_payment_selections`, `qris_upload_requests`, `bank_method_requests`, `payment_submissions`, `refunds`, `refund_history`, `refund_transfer_requests`, `refund_disputes`, `late_payment_reports`, `admin_settings_revision`, `auth_refresh_sessions`, `ktp_dummy_applications`.
 
-Belum ada migrasi: `payment_submissions`, `reviews`, `refunds`, `notifications` (target Tahap 3–4).
+Belum ada migrasi: `notifications` (target Tahap 3–4). Migrasi F1 V5 menyediakan tabel `reviews`; endpoint mengirim ulasan belum tersedia.
 
 ### Deviasi desain vs implementasi
 
 | Area | Desain README | Implementasi saat ini | Keterangan |
 |------|---------------|------------------------|------------|
-| `settings` | `id UUID`, `setting_key`, `setting_value`, `changed_by`, `changed_at`, `reason` | `key` (PK), `value`, `updated_by`, `updated_at` | Mengikuti Flyway V1. Bila desain awal tetap diinginkan, ubah lewat migrasi baru (mis. V5), jangan edit V1. |
+| `settings` | `id UUID`, `setting_key`, `setting_value`, `changed_by`, `changed_at`, `reason` | `key` (PK), `value`, `updated_by`, `updated_at` | Mengikuti Flyway V1. Perubahan berikutnya memerlukan migrasi baru, jangan edit V1. |
 | `audit_logs` | `old_values`/`new_values` JSONB | `old_values`/`new_values` TEXT | Flyway V4. Nilai aksi memakai kode uppercase, mis. `VERIFY_KTP_APPROVED`, `USER_SUSPENDED`. |
+| `payment_submissions` | Snapshot penerima dan nominal ditulis di tabel bukti | Pilihan disalin di V9 saat checkout; penerima dipilih dan dikunci pada `order_payment_snapshots` saat upload bukti; nilai tagihan di `expected_amount` | `expected_amount` bukan klaim nominal yang diterima petani. |
+| `refunds` dan eskalasi | Desain awal menyimpan status/keputusan sengketa dalam tabel refund | V11–V13 memakai `refunds`, `refund_history`, `refund_transfer_requests`, dan `refund_disputes` | Tutup sengketa memulihkan status sebelumnya; snapshot refund serta riwayat dilindungi dari perubahan. |
 | `order_status_history.actor_id` | NOT NULL | NULL diperbolehkan untuk `actor_role='system'` | Flyway V3, agar scheduler bisa mencatat kedaluwarsa tanpa impersonasi user. |
-| Login | `accessToken` + `refreshToken` + `user` | `data` berisi access token (string) | Refresh/logout belum ada; data user diambil dari `GET /auth/me`. |
-| Status code | Ada 422 Unprocessable Entity | 400/403/404/409 | 422 belum dipakai; pelanggaran aturan bisnis dikembalikan sebagai 400/403/409. |
+| Login | `accessToken` + `refreshToken` + `user` | `/auth/login` lama tetap mengembalikan string; `/auth/sessions` mengembalikan keduanya dan user | Integrasi Android perlu beralih ke endpoint sesi baru untuk refresh/logout. |
+| Status code | Ada 422 Unprocessable Entity | 400/403/404/409; upload terlalu besar dapat 413 | 422 belum dipakai; pelanggaran aturan bisnis dikembalikan sebagai 400/403/409. |
 | Tambah produk | Wajib KTP disetujui | `draft` boleh tanpa KTP; publish `aktif` wajib KTP disetujui + metode bayar + foto + stok | Mengikuti aturan bisnis produk aktif. |
-| File storage | Upload KTP/bukti via MinIO | `FileStorage` tersedia, endpoint upload belum | Akan mengembalikan 503 bila konfigurasi MinIO kosong. |
+| File storage | Upload KTP/bukti via MinIO | QRIS dan bukti pembayaran memakai penyimpanan lokal privat; `FileStorage` lama masih placeholder | `FileStorage` selalu mengembalikan 503; adapter MinIO belum tersedia. |
 | Folder | Ada `routes/`, `application.conf` | Spring MVC tanpa `routes/`, memakai `application.properties` | Spring Boot menangani routing via anotasi Controller. |
 
 ### Testing

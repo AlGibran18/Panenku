@@ -18,6 +18,20 @@ class ActorService(private val accounts: UserRepository) {
         return user
     }
 
+    fun requireAccountForSupport(id: UUID): User {
+        val user = accounts.findById(id).orElse(null)
+        if (user == null || user.status !in setOf("active", "suspended") || user.role !in setOf("admin", "petani", "pembeli")) {
+            forbidden("Akun tidak diizinkan.")
+        }
+        return user
+    }
+
+    fun requireActiveForProfile(id: UUID, locked: Boolean = false): User {
+        val user = if (locked) accounts.lockById(id) else accounts.findById(id).orElse(null)
+        if (user == null || user.status != "active" || user.role !in setOf("pembeli", "petani", "admin")) forbidden("Profil tidak tersedia.")
+        return user
+    }
+
     /**
      * Sama seperti [require], tetapi mengunci baris user.
      * Dipakai operasi yang harus serial per akun, misalnya checkout dengan idempotency key.
@@ -25,6 +39,15 @@ class ActorService(private val accounts: UserRepository) {
     fun requireLocked(id: UUID, role: String): User {
         val user = accounts.lockById(id)
         if (user == null || user.role != role || user.status != "active") forbidden("Akses $role tidak diizinkan.")
+        return user
+    }
+
+    /** A suspended farmer can resolve existing refunds, but cannot start new sales. */
+    fun requireFarmerForExistingTransaction(id: UUID, locked: Boolean = false): User {
+        val user = if (locked) accounts.lockById(id) else accounts.findById(id).orElse(null)
+        if (user == null || user.role != "petani" || user.status !in setOf("active", "suspended")) {
+            forbidden("Akses petani tidak diizinkan.")
+        }
         return user
     }
 }
