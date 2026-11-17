@@ -56,7 +56,7 @@ class FulfillmentOptionsService(private val actors: ActorService, private val pr
         if (expected != null && expected != token(rows, farmer, method, district))
             throw ApiException(HttpStatus.CONFLICT, "FULFILLMENT_CHANGED", "Tanggal siap, lokasi, ongkir atau slot berubah. Muat ulang pilihan pemenuhan dan konfirmasi kembali.")
     }
-    private fun token(rows: List<Product>, profile: FarmerProfile, method: String, district: String?): String {
+    internal fun token(rows: List<Product>, profile: FarmerProfile, method: String, district: String?): String {
         val settings = FulfillmentRules.resolve(profile, method, district)
         val payload = listOf(profile.id, profile.storeName, method, settings, scheduling.normalizeSlots(CatalogService.split(profile.timeSlots)),
             rows.sortedBy { it.id }.map { listOf(it.id, it.readyDate) })

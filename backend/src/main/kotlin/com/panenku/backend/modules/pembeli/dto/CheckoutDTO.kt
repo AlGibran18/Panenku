@@ -1,6 +1,8 @@
 package com.panenku.backend.modules.pembeli.dto
 
 import com.fasterxml.jackson.annotation.JsonInclude
+import com.fasterxml.jackson.annotation.JsonSetter
+import com.fasterxml.jackson.annotation.Nulls
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
@@ -17,13 +19,14 @@ data class CartDTO(val items: List<CartItemDTO>, val subtotalItems: BigDecimal,
     val hasUnavailableItems: Boolean = false)
 data class CheckoutItemRequest(val productId: UUID, val quantityKg: BigDecimal, val expectedPricePerKg: Long)
 data class CheckoutRequest(
-    val items: List<CheckoutItemRequest>, val fulfillmentMethod: String, val scheduledDate: LocalDate,
+    @field:JsonSetter(contentNulls = Nulls.FAIL) val items: List<CheckoutItemRequest>, val fulfillmentMethod: String, val scheduledDate: LocalDate,
     val scheduledTimeSlot: String, val expectedDeliveryFee: Long,
     val deliveryAddress: String? = null, val deliveryDistrict: String? = null, val buyerNotes: String? = null,
     // Omit null fields from historical request hashes so old idempotency keys remain replayable.
     @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodId: UUID? = null,
     @field:JsonInclude(JsonInclude.Include.NON_NULL) val paymentMethodVersion: String? = null,
-    @field:JsonInclude(JsonInclude.Include.NON_NULL) val expectedFulfillmentToken: String? = null
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val expectedFulfillmentToken: String? = null,
+    @field:JsonInclude(JsonInclude.Include.NON_NULL) val expectedCheckoutToken: String? = null
 )
 data class OrderItemDTO(val productId: UUID, val productNameSnapshot: String, val commoditySnapshot: String,
     val readyDateSnapshot: LocalDate, val quantityKg: BigDecimal, val pricePerKgSnapshot: Long, val itemSubtotal: Long)

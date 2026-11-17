@@ -4,6 +4,8 @@ import com.panenku.backend.common.exception.*
 import java.math.BigDecimal
 import java.math.RoundingMode
 
+data class CheckoutTotals(val subtotalItems: Long, val deliveryFee: Long, val totalPayment: Long)
+
 object CheckoutMath {
     private val maxKg = BigDecimal("99999999.99")
     fun kg(value: BigDecimal, allowZero: Boolean = false): BigDecimal {
@@ -16,11 +18,19 @@ object CheckoutMath {
         if (price <= 0) invalid("Harga harus rupiah positif.")
         return exact(quantity.multiply(BigDecimal.valueOf(price)).setScale(0, RoundingMode.HALF_UP))
     }
+    fun summary(items: List<Long>, fee: Long): CheckoutTotals {
+        if (items.isEmpty() || items.any { it < 0 } || fee < 0) invalid("Komponen total tidak valid.")
+        val subtotal = items.fold(BigDecimal.ZERO) { sum, value -> sum.add(BigDecimal.valueOf(value)) }
+        return CheckoutTotals(exact(subtotal),fee,exact(subtotal.add(BigDecimal.valueOf(fee))))
+    }
+    fun withinLimit(total: Long, limit: Long): Boolean {
+        if (total < 0 || limit <= 0) invalid("Total atau limit tidak valid.")
+        return total <= limit
+    }
     fun total(items: List<Long>, fee: Long, limit: Long): Long {
-        if (items.isEmpty() || items.any { it < 0 } || fee < 0 || limit <= 0) invalid("Komponen total tidak valid.")
-        val total = items.fold(BigDecimal.valueOf(fee)) { sum, value -> sum.add(BigDecimal.valueOf(value)) }
-        if (total > BigDecimal.valueOf(limit)) invalid("Total termasuk ongkir melebihi limit Rp$limit.")
-        return exact(total)
+        val total=summary(items,fee).totalPayment
+        if (!withinLimit(total,limit)) invalid("Total termasuk ongkir melebihi limit Rp$limit.")
+        return total
     }
     private fun exact(value: BigDecimal): Long = try { value.longValueExact() } catch (_: ArithmeticException) { invalid("Nominal terlalu besar.") }
 }
