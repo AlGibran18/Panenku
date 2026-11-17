@@ -27,14 +27,13 @@ class CheckoutService(
     private val orderItems: OrderItemRepository, private val reservations: StockReservationRepository,
     private val history: OrderStatusHistoryRepository, private val scheduling: SchedulingService,
     private val mapper: ObjectMapper, private val clock: Clock,
-    private val paymentDestinations: PaymentDestinationService, private val fulfillmentOptions: FulfillmentOptionsService
+    private val paymentDestinations: PaymentDestinationService, private val fulfillmentOptions: FulfillmentOptionsService,
+    private val quotes: CheckoutQuoteService
 ) {
     @Transactional
     fun checkout(actor: UUID, key: String, request: CheckoutRequest): OrderDTO {
         if (!Regex("[A-Za-z0-9_-]{1,128}").matches(key)) invalid("Idempotency-Key wajib, maksimal 128 karakter huruf/angka/_/-.")
-        if (request.items.isEmpty() || request.items.size > 100 || request.items.map { it.productId }.distinct().size != request.items.size) invalid("Isi 1–100 item produk unik.")
-        val normalized = request.copy(items = request.items.sortedBy { it.productId }.map { it.copy(quantityKg = CheckoutMath.kg(it.quantityKg)) })
-        if ((request.buyerNotes?.length ?: 0) > 1000 || (request.deliveryAddress?.length ?: 0) > 2000 || (request.deliveryDistrict?.length ?: 0) > 100 || request.scheduledTimeSlot.length > 100) invalid("Teks request terlalu panjang.")
+        val normalized = CheckoutInputRules.normalize(request)
         val hash = MessageDigest.getInstance("SHA-256").digest(mapper.writeValueAsBytes(normalized)).joinToString("") { "%02x".format(it) }
         // Lock baris pembeli sebelum cek idempotency agar retry bersamaan dengan key yang sama
         // benar-benar serial: request kedua menunggu commit pertama lalu membaca order yang sudah ada.
@@ -72,12 +71,17 @@ class CheckoutService(
         val fee = fulfillment.fee
         if (fee != request.expectedDeliveryFee) conflict("Ongkir berubah. Konfirmasi ulang ongkir terbaru.")
         val limit = settings.lockByKey("transaction_limit")?.value?.toLongOrNull()?.takeIf { it > 0 } ?: conflict("Limit transaksi belum dikonfigurasi dengan benar.")
-        val subtotals = locked.mapIndexed { index, p -> CheckoutMath.item(normalized.items[index].quantityKg, p.pricePerKg) }
-        val total = CheckoutMath.total(subtotals, fee, limit)
+        val review = quotes.review(actor,CheckoutInputRules.previewOf(normalized),locked,farmer,
+            commodityMap.mapValues { it.value.name },limit,
+            fulfillmentOptions.token(locked,farmer,request.fulfillmentMethod,request.deliveryDistrict))
+        quotes.verify(request.expectedCheckoutToken,review)
+        if (!review.canCheckout) invalid("Total termasuk ongkir melebihi limit Rp$limit.")
+        val subtotals = review.items.map { it.itemSubtotal }
+        val total = review.totalPayment
         // PostgreSQL TIMESTAMPTZ stores microseconds; keep first response identical to later replays.
         val now = Instant.now(clock).truncatedTo(ChronoUnit.MICROS)
         val order = orders.saveAndFlush(Order(buyerId = actor, farmerId = farmerId, fulfillmentMethod = request.fulfillmentMethod,
-            deliveryFee = fee, subtotalItems = total - fee, totalPayment = total, transactionLimitApplied = limit,
+            deliveryFee = fee, subtotalItems = review.subtotalItems, totalPayment = total, transactionLimitApplied = limit,
             scheduledDate = request.scheduledDate, scheduledTimeSlot = request.scheduledTimeSlot,
             pickupLocationSnapshot = fulfillment.pickupLocation, deliveryAddressSnapshot = if (request.fulfillmentMethod == "delivery") request.deliveryAddress else null,
             deliveryDistrictSnapshot = fulfillment.district,
